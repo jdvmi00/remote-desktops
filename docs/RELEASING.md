@@ -4,7 +4,8 @@
 
 `develop` contains the standalone Rust backend and host adapters. `main` still
 contains the locked bootstrap. There is no published application release,
-installable package, graphical manager, or Omarchy marketplace submission yet.
+installable package or Omarchy marketplace submission yet. A development Qt
+manager is available for configured computers.
 
 The initial CI/workflow bootstrap is complete. Its history was subsequently
 linearized at the owner's request. This is not an application release and
