@@ -8,7 +8,19 @@ ApplicationWindow {
     minimumWidth: 820; minimumHeight: 650
     visible: true
     title: manager.demo ? "Remote Desktops · Design preview" : "Remote Desktops"
-    color: "#141c20"
+    color: theme.colors.bg
+    palette.window: theme.colors.bg
+    palette.windowText: theme.colors.text
+    palette.text: theme.colors.text
+    palette.button: theme.colors.surface
+    palette.buttonText: theme.colors.text
+    palette.base: theme.colors.surface
+    palette.alternateBase: theme.colors.hover
+    palette.highlight: theme.colors.accent
+    palette.highlightedText: theme.colors.onAccent
+    palette.brightText: theme.colors.onAccent
+    palette.dark: theme.colors.secondary
+    palette.mid: theme.colors.border
     font.family: "Inter"
     font.pixelSize: 14
     property string selectedId: ""
@@ -41,9 +53,9 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+R"; onActivated: manager.refresh() }
     Shortcut { sequence: "Ctrl+Return"; enabled: root.canAct; onActivated: root.action() }
     Shortcut { sequences: [StandardKey.Cancel]; onActivated: { help.close(); details.close() } }
-    component Caption: Label { color: "#a6b3b7"; font.pixelSize: 12; font.letterSpacing: 1.4 }
-    component Body: Label { textFormat: Text.PlainText; color: "#c2ccce"; wrapMode: Text.WordWrap; lineHeight: 1.25 }
-    component Divider: Rectangle { color: "#2e393e"; height: 1; Layout.fillWidth: true }
+    component Caption: Label { color: theme.colors.secondary; font.pixelSize: 12; font.letterSpacing: 1.4 }
+    component Body: Label { textFormat: Text.PlainText; color: theme.colors.secondary; wrapMode: Text.WordWrap; lineHeight: 1.25 }
+    component Divider: Rectangle { color: theme.colors.border; height: 1; Layout.fillWidth: true }
 
     RowLayout {
         anchors.fill: parent
@@ -51,16 +63,16 @@ ApplicationWindow {
         Rectangle {
             Layout.preferredWidth: root.width < 960 ? 258 : 290
             Layout.fillHeight: true
-            color: "#10171b"
+            color: theme.colors.sidebar
             ColumnLayout {
                 anchors.fill: parent; anchors.margins: 24; spacing: 0
                 RowLayout {
                     Layout.topMargin: 10; spacing: 12
                     Rectangle {
-                        width: 34; height: 34; radius: 10; color: "#afe6c5"
-                        ComputerGlyph { anchors.centerIn: parent; ink: "#183729" }
+                        width: 34; height: 34; radius: 10; color: theme.colors.accent
+                        ComputerGlyph { anchors.centerIn: parent; ink: theme.colors.onAccent }
                     }
-                    Label { text: "Remote\nDesktops"; color: "#edf1ed"; font.pixelSize: 17; font.weight: Font.DemiBold; lineHeight: .95 }
+                    Label { text: "Remote\nDesktops"; color: theme.colors.text; font.pixelSize: 17; font.weight: Font.DemiBold; lineHeight: .95 }
                 }
                 Caption { text: "YOUR COMPUTERS"; Layout.topMargin: 48; Layout.bottomMargin: 16 }
                 ListView {
@@ -82,20 +94,20 @@ ApplicationWindow {
                         Accessible.name: modelData.name + ", " + (modelData.stale ? "Status unavailable" : root.label(modelData.phase))
                         onClicked: { root.selectedId = modelData.computer; computerList.currentIndex = index }
                         background: Rectangle {
-                            radius: 10; color: row.selected ? "#25332f" : row.hovered ? "#1d272c" : "transparent"
+                            radius: 10; color: row.selected ? theme.colors.selected : row.hovered ? theme.colors.hover : "transparent"
                             border.width: row.visualFocus ? 2 : 1
-                            border.color: row.visualFocus ? "#afe6c5" : row.selected ? "#3e584b" : "transparent"
+                            border.color: row.visualFocus ? theme.colors.accent : row.selected ? theme.colors.selectedBorder : "transparent"
                         }
                         contentItem: RowLayout {
                             spacing: 12
-                            ComputerGlyph { Layout.leftMargin: 5; ink: row.selected ? "#afe6c5" : "#97a8ae"; laptop: modelData.platform === "macos" || modelData.platform === "windows" }
+                            ComputerGlyph { Layout.leftMargin: 5; ink: row.selected ? theme.colors.accent : theme.colors.muted; laptop: modelData.platform === "macos" || modelData.platform === "windows" }
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 7
-                                Label { Layout.fillWidth: true; textFormat: Text.PlainText; text: modelData.name || modelData.computer; color: "#edf1ed"; font.weight: Font.Medium; elide: Text.ElideRight }
+                                Label { Layout.fillWidth: true; textFormat: Text.PlainText; text: modelData.name || modelData.computer; color: theme.colors.text; font.weight: Font.Medium; elide: Text.ElideRight }
                                 RowLayout {
                                     spacing: 6
-                                    Rectangle { width: 5; height: 5; radius: 3; color: modelData.stale ? "#87979e" : modelData.phase === "window-ready" ? "#afe6c5" : modelData.phase === "restore-pending" || modelData.phase === "attention" ? "#e9bd83" : "#77888f" }
-                                    Label { text: modelData.stale ? "Status unavailable" : root.label(modelData.phase); color: "#aebcbe"; font.pixelSize: 11; elide: Text.ElideRight; Layout.fillWidth: true }
+                                    Rectangle { width: 5; height: 5; radius: 3; color: modelData.stale ? theme.colors.muted : modelData.phase === "window-ready" ? theme.colors.accent : modelData.phase === "restore-pending" || modelData.phase === "attention" ? theme.colors.warning : theme.colors.muted }
+                                    Label { text: modelData.stale ? "Status unavailable" : root.label(modelData.phase); color: theme.colors.secondary; font.pixelSize: 11; elide: Text.ElideRight; Layout.fillWidth: true }
                                 }
                             }
                         }
@@ -107,13 +119,13 @@ ApplicationWindow {
                 Divider { Layout.topMargin: 22; Layout.bottomMargin: 18 }
                 RowLayout {
                     spacing: 7
-                    Rectangle { width: 6; height: 6; radius: 3; color: manager.available ? "#afe6c5" : "#d9b881" }
-                    Label { text: manager.demo ? "DESIGN PREVIEW" : manager.available ? "MANAGER READY" : "STATUS UNAVAILABLE"; color: "#9dadaf"; font.pixelSize: 10; font.letterSpacing: 1 }
+                    Rectangle { width: 6; height: 6; radius: 3; color: manager.available ? theme.colors.accent : theme.colors.warning }
+                    Label { text: manager.demo ? "DESIGN PREVIEW" : manager.available ? "MANAGER READY" : "STATUS UNAVAILABLE"; color: theme.colors.muted; font.pixelSize: 10; font.letterSpacing: 1 }
                 }
-                Body { Layout.fillWidth: true; Layout.topMargin: 9; Layout.bottomMargin: 8; text: manager.demo ? "Sample computers. All actions are simulated." : "Your connections stay open when you close this window."; font.pixelSize: 11; color: "#85969d" }
+                Body { Layout.fillWidth: true; Layout.topMargin: 9; Layout.bottomMargin: 8; text: manager.demo ? "Sample computers. All actions are simulated." : "Your connections stay open when you close this window."; font.pixelSize: 11; color: theme.colors.muted }
             }
         }
-        Rectangle { Layout.fillHeight: true; width: 1; color: "#29343a" }
+        Rectangle { Layout.fillHeight: true; width: 1; color: theme.colors.border }
         ScrollView {
             Layout.fillWidth: true; Layout.fillHeight: true
             contentWidth: availableWidth
@@ -127,65 +139,65 @@ ApplicationWindow {
                     Caption { text: "WORK FROM ANYWHERE" }
                     RowLayout {
                         Layout.fillWidth: true; Layout.topMargin: 12; spacing: 14
-                        Label { Layout.fillWidth: true; textFormat: Text.PlainText; text: root.selected ? root.selected.name || root.selected.computer : "Your desk, wherever you are."; color: "#f0f2ed"; font.pixelSize: root.width < 960 ? 29 : 36; font.weight: Font.DemiBold; font.letterSpacing: -1; elide: Text.ElideRight }
+                        Label { Layout.fillWidth: true; textFormat: Text.PlainText; text: root.selected ? root.selected.name || root.selected.computer : "Your desk, wherever you are."; color: theme.colors.text; font.pixelSize: root.width < 960 ? 29 : 36; font.weight: Font.DemiBold; font.letterSpacing: -1; elide: Text.ElideRight }
                         Rectangle {
                             visible: !!root.selected; implicitWidth: statusText.implicitWidth + 26; height: 30; radius: 15
-                            color: root.recovering ? "#3e3325" : root.connected ? "#243b30" : "#253035"
-                            Label { id: statusText; anchors.centerIn: parent; text: !manager.available ? "Status unavailable" : root.label(root.phase); color: root.recovering ? "#f0c68e" : root.connected ? "#afe6c5" : "#bfccce"; font.pixelSize: 11; font.weight: Font.Medium }
+                            color: root.recovering ? theme.colors.warningBg : root.connected ? theme.colors.selected : theme.colors.surface
+                            Label { id: statusText; anchors.centerIn: parent; text: !manager.available ? "Status unavailable" : root.label(root.phase); color: root.recovering ? theme.colors.warning : root.connected ? theme.colors.accentText : theme.colors.secondary; font.pixelSize: 11; font.weight: Font.Medium }
                         }
                     }
                     Body { Layout.fillWidth: true; Layout.topMargin: 9; text: root.selected ? (root.selected.platform === "macos" ? "macOS" : root.selected.platform === "windows" ? "Windows" : root.selected.platform === "linux" ? "Linux" : "Remote computer") + (root.selected.host ? "  /  " + root.selected.host : "") : "Bring your computers together in one quiet workspace."; elide: Text.ElideRight; maximumLineCount: 2 }
                     Rectangle {
                         visible: !!manager.error || (!manager.available && !manager.loading)
-                        Layout.fillWidth: true; Layout.topMargin: 20; implicitHeight: serviceMessage.implicitHeight + 28; radius: 10; color: "#332e25"; border.color: "#65533c"
-                        Body { id: serviceMessage; anchors.fill: parent; anchors.margins: 14; color: "#f0d4a8"; text: manager.error || "Live status is unavailable. Existing connections may still be running. Connect starts the service if needed; refresh to check again."; font.pixelSize: 12 }
+                        Layout.fillWidth: true; Layout.topMargin: 20; implicitHeight: serviceMessage.implicitHeight + 28; radius: 10; color: theme.colors.warningBg; border.color: theme.colors.warningBorder
+                        Body { id: serviceMessage; anchors.fill: parent; anchors.margins: 14; color: theme.colors.warning; text: manager.error || "Live status is unavailable. Existing connections may still be running. Connect starts the service if needed; refresh to check again."; font.pixelSize: 12 }
                     }
                     Rectangle {
                         visible: !!manager.notice
                         Layout.fillWidth: true; Layout.topMargin: 16
                         implicitHeight: feedback.implicitHeight + 24
-                        color: "#24322f"; border.color: "#476354"; radius: 10
+                        color: theme.colors.selected; border.color: theme.colors.selectedBorder; radius: 10
                         RowLayout {
                             id: feedback
                             anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 12
                             Body { Layout.fillWidth: true; text: manager.notice; font.pixelSize: 12; Accessible.role: Accessible.AlertMessage }
-                            Button { text: "Dismiss"; flat: true; palette.buttonText: "#c0daca"; onClicked: manager.clearNotice() }
+                            Button { text: "Dismiss"; flat: true; palette.windowText: theme.colors.secondary; onClicked: manager.clearNotice() }
                         }
                     }
                     Rectangle {
                         visible: root.recovering || !!(root.selected && root.selected.error)
-                        Layout.fillWidth: true; Layout.topMargin: 20; implicitHeight: recoveryText.implicitHeight + 34; color: "#332c24"; radius: 12; border.color: "#685138"
+                        Layout.fillWidth: true; Layout.topMargin: 20; implicitHeight: recoveryText.implicitHeight + 34; color: theme.colors.warningBg; radius: 12; border.color: theme.colors.warningBorder
                         ColumnLayout {
                             id: recoveryText
                             anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 17; spacing: 7
-                            Label { text: root.recovering ? "Your display settings are protected" : "This connection needs attention"; color: "#f4d3a5"; font.weight: Font.DemiBold }
-                            Body { Layout.fillWidth: true; text: root.recovering ? "The last session could not finish restoring the host display. Bring the computer online, then restore before connecting again." : "Check that the computer and Sunshine are available, then try again."; font.pixelSize: 12; color: "#d5c4ad" }
-                            Button { text: "View technical details"; flat: true; palette.buttonText: "#f4d3a5"; onClicked: details.open() }
+                            Label { text: root.recovering ? "Your display settings are protected" : "This connection needs attention"; color: theme.colors.warning; font.weight: Font.DemiBold }
+                            Body { Layout.fillWidth: true; text: root.recovering ? "The last session could not finish restoring the host display. Bring the computer online, then restore before connecting again." : "Check that the computer and Sunshine are available, then try again."; font.pixelSize: 12; color: theme.colors.warning }
+                            Button { text: "View technical details"; flat: true; palette.windowText: theme.colors.warning; onClicked: details.open() }
                         }
                     }
                     Rectangle {
                         Layout.fillWidth: true; Layout.topMargin: 27
-                        implicitHeight: root.recovering || manager.error || manager.notice || !manager.available ? 220 : 280; radius: 16; color: "#1b272b"; border.color: "#344349"
-                        gradient: Gradient { GradientStop { position: 0; color: "#243731" } GradientStop { position: 1; color: "#192428" } }
+                        implicitHeight: root.recovering || manager.error || manager.notice || !manager.available ? 220 : 280; radius: 16; color: theme.colors.surface; border.color: theme.colors.border
+                        gradient: Gradient { GradientStop { position: 0; color: theme.colors.heroStart } GradientStop { position: 1; color: theme.colors.heroEnd } }
                         BusyIndicator { anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 14; width: 28; height: 28; running: root.transitioning || !!(root.selected && root.selected.busy); visible: running; Accessible.name: "Connection operation in progress" }
                         // Abstract device illustration; never a fabricated remote screenshot.
                         Rectangle {
                             width: 220; height: 132; radius: 10; anchors.horizontalCenter: parent.horizontalCenter; y: parent.height < 280 ? 15 : 34
                             scale: parent.height < 280 ? 0.75 : 1
                             transformOrigin: Item.Top
-                            color: "#172321"; border.color: root.connected ? "#678c77" : "#536763"; border.width: 2
-                            Rectangle { anchors.fill: parent; anchors.margins: 7; radius: 5; color: "#243b33"
-                                Rectangle { x: 14; y: 15; width: 52; height: 80; radius: 5; color: "#344f42" }
-                                Rectangle { x: 76; y: 15; width: 110; height: 35; radius: 5; color: "#4c715a" }
-                                Rectangle { x: 76; y: 60; width: 50; height: 35; radius: 5; color: "#344f42" }
-                                Rectangle { x: 136; y: 60; width: 50; height: 35; radius: 5; color: "#3a5849" }
+                            color: theme.colors.screen; border.color: root.connected ? theme.colors.selectedBorder : theme.colors.border; border.width: 2
+                            Rectangle { anchors.fill: parent; anchors.margins: 7; radius: 5; color: theme.colors.screen
+                                Rectangle { x: 14; y: 15; width: 52; height: 80; radius: 5; color: theme.colors.tile1 }
+                                Rectangle { x: 76; y: 15; width: 110; height: 35; radius: 5; color: theme.colors.tile2 }
+                                Rectangle { x: 76; y: 60; width: 50; height: 35; radius: 5; color: theme.colors.tile1 }
+                                Rectangle { x: 136; y: 60; width: 50; height: 35; radius: 5; color: theme.colors.tile3 }
                             }
-                            Rectangle { anchors.horizontalCenter: parent.horizontalCenter; y: 133; width: 20; height: 12; color: "#718a7d" }
-                            Rectangle { anchors.horizontalCenter: parent.horizontalCenter; y: 144; width: 76; height: 3; radius: 2; color: "#718a7d" }
+                            Rectangle { anchors.horizontalCenter: parent.horizontalCenter; y: 133; width: 20; height: 12; color: theme.colors.selectedBorder }
+                            Rectangle { anchors.horizontalCenter: parent.horizontalCenter; y: 144; width: 76; height: 3; radius: 2; color: theme.colors.selectedBorder }
                         }
                         ColumnLayout {
                             anchors.horizontalCenter: parent.horizontalCenter; y: parent.height < 280 ? 145 : 202; width: parent.width - 40; spacing: 8
-                            Label { Layout.alignment: Qt.AlignHCenter; text: manager.loading ? "Finding your computers…" : !root.selected ? "A place for every computer" : !manager.available ? "Connection status unavailable" : root.selected.busy ? "Sending request…" : root.transitioning ? root.label(root.phase) + "…" : root.recovering ? "Let's finish restoring your display" : root.connected ? "Your desktop is open" : root.phase === "running" ? "Client started" : "Ready when you are"; color: "#e9f0e8"; font.pixelSize: 19; font.weight: Font.Medium }
+                            Label { Layout.alignment: Qt.AlignHCenter; text: manager.loading ? "Finding your computers…" : !root.selected ? "A place for every computer" : !manager.available ? "Connection status unavailable" : root.selected.busy ? "Sending request…" : root.transitioning ? root.label(root.phase) + "…" : root.recovering ? "Let's finish restoring your display" : root.connected ? "Your desktop is open" : root.phase === "running" ? "Client started" : "Ready when you are"; color: theme.colors.text; font.pixelSize: 19; font.weight: Font.Medium }
                             Body { Layout.alignment: Qt.AlignHCenter; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true; font.pixelSize: 12; text: !root.selected ? "Set up a paired computer to start your first session." : !manager.available ? "Refresh status, or connect to start the manager again." : root.connected ? "Switch to its window and pick up where you left off." : root.phase === "running" ? "The client is running; window detection is not available." : root.recovering ? "The saved recovery record stays safe until restoration succeeds." : "A full desktop, in its own window." }
                         }
                     }
@@ -208,8 +220,8 @@ ApplicationWindow {
                                 enabled: !!root.selected && !root.selected.desired && !root.selected.busy && !root.recovering && !root.transitioning
                                 onActivated: root.chosenProfile = currentText
                                 Accessible.name: "Connection profile"
-                                palette.text: "#edf1ed"; palette.buttonText: "#edf1ed"; palette.base: "#232e33"; palette.highlight: "#49624f"; palette.highlightedText: "#ffffff"
-                                background: Rectangle { radius: 8; color: "#232e33"; border.color: profiles.visualFocus ? "#afe6c5" : "#405057" }
+                                palette.text: theme.colors.text; palette.buttonText: theme.colors.text; palette.base: theme.colors.surface; palette.highlight: theme.colors.selectedBorder; palette.highlightedText: theme.colors.text
+                                background: Rectangle { radius: 8; color: theme.colors.surface; border.color: profiles.visualFocus ? theme.colors.accent : theme.colors.border }
                                 ToolTip.visible: hovered && !enabled
                                 ToolTip.text: "Disconnect before changing profiles."
                             }
@@ -217,8 +229,8 @@ ApplicationWindow {
                         ColumnLayout {
                             Layout.alignment: Qt.AlignRight; spacing: 9
                             Caption { text: "SESSION BEHAVIOR"; font.pixelSize: 10 }
-                            Label { text: "Windowed · Move freely"; color: "#c5d1cd"; font.pixelSize: 13 }
-                            Label { text: "No workspace restrictions"; color: "#8e9fa5"; font.pixelSize: 11 }
+                            Label { text: "Windowed · Move freely"; color: theme.colors.secondary; font.pixelSize: 13 }
+                            Label { text: "No workspace restrictions"; color: theme.colors.muted; font.pixelSize: 11 }
                         }
                     }
                     Divider { Layout.topMargin: 23; Layout.bottomMargin: 23 }
@@ -239,9 +251,9 @@ ApplicationWindow {
                     }
                     RowLayout {
                         Layout.fillWidth: true; Layout.topMargin: 18; visible: !!root.selected
-                        Button { text: "Add to app launcher"; flat: true; palette.buttonText: "#b9cdc1"; enabled: !!root.selected && !root.selected.busy && !root.selected.unconfigured; onClicked: manager.act(root.selected.computer, "launcher") }
+                        Button { text: "Add to app launcher"; flat: true; palette.windowText: theme.colors.secondary; enabled: !!root.selected && !root.selected.busy && !root.selected.unconfigured; onClicked: manager.act(root.selected.computer, "launcher") }
                         Item { Layout.fillWidth: true }
-                        Button { text: "Connection details"; flat: true; palette.buttonText: "#9eafb3"; onClicked: details.open() }
+                        Button { text: "Connection details"; flat: true; palette.windowText: theme.colors.muted; onClicked: details.open() }
                     }
                     Item { Layout.preferredHeight: 28 }
                 }
@@ -253,7 +265,7 @@ ApplicationWindow {
         objectName: "helpDialog"
         anchors.centerIn: parent; width: Math.min(root.width - 64, 540)
         modal: true; title: "Make yourself at home"; standardButtons: Dialog.Close
-        palette.window: "#202a2e"; palette.windowText: "#edf1ed"; palette.text: "#edf1ed"; palette.buttonText: "#edf1ed"
+        palette.window: theme.colors.surface; palette.windowText: theme.colors.text; palette.text: theme.colors.text; palette.buttonText: theme.colors.text
         ColumnLayout {
             width: parent.width; spacing: 18
             Body { Layout.fillWidth: true; text: "Remote Desktops manages your connections. Each remote desktop opens in its own Moonlight window." }
@@ -269,11 +281,11 @@ ApplicationWindow {
         id: details
         anchors.centerIn: parent; width: Math.min(root.width - 64, 550)
         modal: true; title: "Connection details"; standardButtons: Dialog.Close
-        palette.window: "#202a2e"; palette.windowText: "#edf1ed"; palette.text: "#edf1ed"; palette.buttonText: "#edf1ed"
+        palette.window: theme.colors.surface; palette.windowText: theme.colors.text; palette.text: theme.colors.text; palette.buttonText: theme.colors.text
         ColumnLayout {
             width: parent.width; spacing: 16
             Body { Layout.fillWidth: true; text: root.selected ? "Computer: " + root.selected.computer + "\nProfile: " + root.profile + "\nState: " + root.label(root.phase) + "\nWindow detected: " + (root.selected.window ? "Yes" : "No") : "No computer selected." }
-            Body { Layout.fillWidth: true; text: root.selected ? root.selected.error || root.selected.recovery_error || "No connection errors reported." : ""; color: "#e2c19e" }
+            Body { Layout.fillWidth: true; text: root.selected ? root.selected.error || root.selected.recovery_error || "No connection errors reported." : ""; color: theme.colors.warning }
             Body { Layout.fillWidth: true; text: "Window detection confirms an owned client window. It does not measure video latency, frame rate, or image quality."; font.pixelSize: 12 }
             ActionButton { text: "Copy details"; onClicked: manager.copy(root.selected ? "Computer: " + root.selected.computer + "\nPhase: " + root.phase + "\n" + (root.selected.error || root.selected.recovery_error || "") : "No computer selected") }
         }

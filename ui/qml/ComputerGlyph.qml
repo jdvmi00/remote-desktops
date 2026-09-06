@@ -1,7 +1,7 @@
 import QtQuick
 Item {
     id: icon
-    property color ink: "#b2c2ba"
+    property color ink: theme.colors.secondary
     property bool laptop: false
     implicitWidth: 28
     implicitHeight: 28
