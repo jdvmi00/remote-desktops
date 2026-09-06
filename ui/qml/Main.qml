@@ -51,8 +51,8 @@ ApplicationWindow {
         manager.act(selected.computer, recovering ? "restore" : connected ? "focus" : "connect", profile)
     }
     Shortcut { sequence: "Ctrl+R"; onActivated: manager.refresh() }
-    Shortcut { sequence: "Ctrl+Return"; enabled: root.canAct; onActivated: root.action() }
-    Shortcut { sequences: [StandardKey.Cancel]; onActivated: { help.close(); details.close() } }
+    Shortcut { sequence: "Ctrl+Return"; enabled: root.canAct && !setup.visible; onActivated: root.action() }
+    Shortcut { sequences: [StandardKey.Cancel]; onActivated: { help.close(); details.close(); if (!manager.setupBusy) setup.close() } }
     component Caption: Label { color: theme.colors.secondary; font.pixelSize: 12; font.letterSpacing: 1.4 }
     component Body: Label { textFormat: Text.PlainText; color: theme.colors.secondary; wrapMode: Text.WordWrap; lineHeight: 1.25 }
     component Divider: Rectangle { color: theme.colors.border; height: 1; Layout.fillWidth: true }
@@ -115,6 +115,7 @@ ApplicationWindow {
                 }
                 ActionButton { Layout.fillWidth: true; text: "Refresh computers"; hint: "Refresh settings and connection status · Ctrl+R"; enabled: !manager.loading; onClicked: manager.refresh() }
                 Item { height: 14 }
+                ActionButton { objectName: "addComputer"; Layout.fillWidth: true; primary: true; text: "+  Add computer"; enabled: !manager.setupBusy; onClicked: setup.begin("") }
                 ActionButton { Layout.fillWidth: true; text: "Setup & help"; onClicked: help.open() }
                 Divider { Layout.topMargin: 22; Layout.bottomMargin: 18 }
                 RowLayout {
@@ -204,7 +205,7 @@ ApplicationWindow {
                     ActionButton {
                         visible: !root.selected && !manager.loading
                         Layout.topMargin: 20
-                        primary: true; text: "Set up a computer"; onClicked: help.open()
+                        primary: true; text: "Set up a computer"; onClicked: setup.begin("")
                     }
                     RowLayout {
                         visible: !!root.selected
@@ -253,6 +254,7 @@ ApplicationWindow {
                         Layout.fillWidth: true; Layout.topMargin: 18; visible: !!root.selected
                         Button { text: "Add to app launcher"; flat: true; palette.windowText: theme.colors.secondary; enabled: !!root.selected && !root.selected.busy && !root.selected.unconfigured; onClicked: manager.act(root.selected.computer, "launcher") }
                         Item { Layout.fillWidth: true }
+                        Button { text: "Edit"; enabled: !!root.selected && !root.selected.unconfigured && !manager.setupBusy; flat: true; onClicked: setup.begin(root.selected.computer) }
                         Button { text: "Connection details"; flat: true; palette.windowText: theme.colors.muted; onClicked: details.open() }
                     }
                     Item { Layout.preferredHeight: 28 }
@@ -260,6 +262,7 @@ ApplicationWindow {
             }
         }
     }
+    SetupDialog { id: setup; onSaved: computer => { root.selectedId = computer; manager.refresh() } }
     Dialog {
         id: help
         objectName: "helpDialog"
@@ -269,7 +272,7 @@ ApplicationWindow {
         ColumnLayout {
             width: parent.width; spacing: 18
             Body { Layout.fillWidth: true; text: "Remote Desktops manages your connections. Each remote desktop opens in its own Moonlight window." }
-            Body { Layout.fillWidth: true; text: "1. Pair your computer in Moonlight.\n2. Add its connection settings using the setup guide.\n3. Refresh this list, choose a profile, and connect." }
+            Body { Layout.fillWidth: true; text: "1. Pair your computer in Moonlight.\n2. Choose Add computer and follow the setup steps.\n3. Test, save, and connect." }
             Body { Layout.fillWidth: true; text: "Add a computer to your app launcher to open it directly. In Hypertile Scenes, choose that launcher as an ordinary app." }
             ActionButton { text: "Open setup guide  ↗"; onClicked: Qt.openUrlExternally("https://github.com/jdvmi00/remote-desktops/blob/develop/docs/BACKEND.md") }
             Divider {}

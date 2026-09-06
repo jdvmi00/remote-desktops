@@ -392,5 +392,125 @@ class BackendTests(unittest.TestCase):
         self.assertFalse(self.cli("status", "laptop")["recovery_pending"])
 
 
+
+class SettingsTests(unittest.TestCase):
+    """Real config validation and writes; synthetic Moonlight and no networking."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.env = {**os.environ, "HOME": str(self.root), "XDG_CONFIG_HOME": str(self.root / "config"),
+                    "XDG_RUNTIME_DIR": str(self.root / "runtime"), "XDG_STATE_HOME": str(self.root / "state"),
+                    "REMOTE_DESKTOPS_HELPERS": str(self.root / "helpers")}
+        self.env.pop("PYTHONPATH", None)
+        package = self.root / "helpers/remote_desktops"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("__path__.append(" + repr(str(ROOT / "remote_desktops")) + ")\n")
+        (package / "worker.py").write_text(
+            "import contextlib\nfrom remote_desktops import host\n"
+            "host.socket.create_connection = lambda *a, **k: contextlib.nullcontext()\n"
+            "exec(compile(open(" + repr(str(ROOT / "remote_desktops/worker.py")) + ").read(), 'worker.py', 'exec'))\n")
+        bindir = self.root / "bin"
+        bindir.mkdir()
+        self.env["PATH"] = str(bindir) + os.pathsep + self.env["PATH"]
+        moonlight = bindir / "moonlight"
+        moonlight.write_text("#!/bin/sh\ncase \"$1\" in --version) echo 'Moonlight v6.1.0';; list) echo \"${FAKE_APP-Desktop}\";; *) exit 99;; esac\n")
+        moonlight.chmod(0o700)
+        self.uuid = "11111111-2222-3333-4444-555555555555"
+        paired = self.root / "config/Moonlight Game Streaming Project/Moonlight.conf"
+        paired.parent.mkdir(parents=True)
+        paired.write_text("[hosts]\n1\\uuid=" + self.uuid + "\n1\\hostname=Home PC\n1\\srvcert=synthetic-test-only\n1\\localaddress=home.example.net\n")
+        self.config = self.root / "config/remote-desktops/computers.json"
+
+    def cli(self, *args, draft=None, ok=True):
+        p = subprocess.run([str(BIN), "--json", "settings", *args], input=json.dumps(draft) if draft else None,
+                           env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(p.returncode == 0, ok, p.stderr)
+        return json.loads(p.stdout) if ok else p.stderr
+
+    def draft(self):
+        catalog = self.cli("catalog")
+        self.assertNotIn("synthetic-test-only", json.dumps(catalog))
+        self.assertEqual(catalog["paired"][0]["host"], "home.example.net")
+        return {"computer": "home", "pairing_uuid": self.uuid, "revision": catalog["revision"],
+                "name": "Home", "host": "home.example.net", "platform": "linux", "profile": "desktop",
+                "stream_resolution": "1920x1080", "fps": 60, "bitrate": 30000,
+                "codec": "auto", "input": "absolute", "audio": "focus"}
+
+    def test_setup_checks_and_saves_without_starting_daemon_or_stream(self):
+        draft = self.draft()
+        self.assertTrue(self.cli("test", draft=draft)["tested"])
+        self.assertFalse(self.config.exists())
+        self.cli("save", draft=draft)
+        value = json.loads(self.config.read_text())["computers"]["home"]
+        self.assertEqual(value["title"], "Home PC - Moonlight")
+        self.assertEqual(value["profiles"]["desktop"]["display"], {"adapter": "external"})
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
+        self.assertFalse((self.root / "runtime").exists())
+        self.assertFalse((self.root / "state").exists())
+        self.assertTrue(self.cli("catalog")["paired"][0]["configured"])
+
+    def test_edits_preserve_other_profiles_display_ssh_and_window_identity(self):
+        self.cli("save", draft=self.draft())
+        value = json.loads(self.config.read_text())
+        c = value["computers"]["home"]
+        c["platform"] = "macos"
+        c["ssh"] = {"user": "synthetic"}
+        c["profiles"]["desktop"]["display"] = {"adapter": "macos"}
+        c["profiles"]["desktop"].update(hdr=True, system_keys="always")
+        c["profiles"]["presentation"] = {"stream_resolution": "3840x2160"}
+        value["extra"] = "preserve"
+        self.config.write_text(json.dumps(value))
+        session = self.root / "state/remote-desktops/sessions/home/session.json"
+        session.parent.mkdir(parents=True)
+        session.write_text(json.dumps({"desired": True, "phase": "window-ready", "config": c}))
+        snapshot = session.read_bytes()
+        draft = self.cli("get", "home")
+        self.assertNotIn("ssh", draft)
+        self.assertNotIn("display", draft["profiles"]["desktop"])
+        draft.update(name="Renamed", stream_resolution="2560x1440", title="ignored", ssh={"user":"ignored"})
+        self.cli("save", draft=draft)
+        after = json.loads(self.config.read_text())
+        expected = value
+        expected["computers"]["home"]["name"] = "Renamed"
+        expected["computers"]["home"]["profiles"]["desktop"]["stream_resolution"] = "2560x1440"
+        self.assertEqual(after, expected)
+        self.assertEqual(session.read_bytes(), snapshot)
+
+    def test_stale_invalid_duplicate_and_failed_probe_do_not_write(self):
+        draft = self.draft()
+        self.env["FAKE_APP"] = "Unavailable"
+        self.assertIn("pairing-or-app-required", self.cli("test", draft=draft, ok=False))
+        self.assertFalse(self.config.exists())
+        self.cli("save", draft=draft)
+        original = self.config.read_bytes()
+        self.assertIn("changed elsewhere", self.cli("save", draft=draft, ok=False))
+        duplicate = self.draft()
+        duplicate["computer"] = "duplicate"
+        self.assertIn("same pairing", self.cli("save", draft=duplicate, ok=False))
+        bad = self.cli("get", "home")
+        bad["fps"] = 0
+        self.assertIn("invalid FPS", self.cli("save", draft=bad, ok=False))
+        self.assertEqual(self.config.read_bytes(), original)
+
+    def test_locked_save_leaves_configuration_unchanged(self):
+        self.cli("save", draft=self.draft())
+        before = self.config.read_bytes()
+        draft = self.cli("get", "home")
+        draft["name"] = "Changed"
+        with self.config.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self.assertIn("save is in progress", self.cli("save", draft=draft, ok=False))
+        self.assertEqual(self.config.read_bytes(), before)
+
+    def test_removed_computer_session_cannot_gain_a_second_owner(self):
+        draft = self.draft()
+        directory = self.root / "state/remote-desktops/sessions/original"
+        directory.mkdir(parents=True)
+        (directory / "session.json").write_text(json.dumps({"config":{"pairing_uuid":self.uuid}}))
+        self.assertIn("saved session", self.cli("save", draft=draft, ok=False))
+        self.assertFalse(self.config.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

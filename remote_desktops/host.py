@@ -38,7 +38,10 @@ def resolution(value):
 
 
 def configuration(path):
-    value = load(path, {"version": 1, "computers": {}})
+    return configuration_value(load(path, {"version": 1, "computers": {}}))
+
+
+def configuration_value(value):
     require(value.get("version") == 1 and isinstance(value.get("computers"), dict), "unsupported computers.json schema")
     identities = set()
     titles = set()
@@ -53,6 +56,9 @@ def configuration(path):
         require(not any(ord(c) < 32 for c in computer["title"]), "title must not contain control characters")
         require(computer["title"] not in titles, "computer window titles must be unique for launcher matching")
         titles.add(computer["title"])
+        if "name" in computer:
+            require(isinstance(computer["name"], str) and 1 <= len(computer["name"]) <= 100
+                    and not any(ord(c) < 32 or ord(c) == 127 for c in computer["name"]), "name must be 1–100 characters without control characters")
         require(isinstance(computer.get("profiles"), dict) and computer["profiles"], "computer needs profiles")
         require(computer.get("platform", "unknown") in ("macos", "windows", "linux", "unknown"), "invalid host platform")
         require("default_profile" not in computer or computer["default_profile"] in computer["profiles"], "unknown default profile")
@@ -109,7 +115,7 @@ def moonlight_hosts():
             # Certificate material never leaves Moonlight's own configuration.
             result[value.lower()] = {"name": hosts.get(prefix + "hostname"),
                                       "paired": bool(hosts.get(prefix + "srvcert")),
-                                      "address": hosts.get(prefix + "manualaddress")}
+                                      "address": hosts.get(prefix + "manualaddress") or hosts.get(prefix + "localaddress") or hosts.get(prefix + "remoteaddress")}
     return result
 
 

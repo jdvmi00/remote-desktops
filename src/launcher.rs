@@ -59,7 +59,9 @@ fn exec_arg(s: &str) -> Result<String> {
 }
 fn entry(binary: &Path, name: &str, config: &Value) -> Result<String> {
     let title = config["title"].as_str().context("missing window title")?;
-    let label = title.strip_suffix(" - Moonlight").unwrap_or(title);
+    let label = config["name"]
+        .as_str()
+        .unwrap_or_else(|| title.strip_suffix(" - Moonlight").unwrap_or(title));
     let executable = exec_arg(binary.to_str().context("executable path is not UTF-8")?)?;
     let computer = exec_arg(name)?;
     Ok(format!(

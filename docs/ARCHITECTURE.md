@@ -117,3 +117,30 @@ a 60-second acknowledgement bound, with uncertainty reported if it expires;
 only the CLI process is stopped, not the independent daemon or its host work.
 No synchronous process/socket wait occurs on the GUI thread. These are resource
 bounds, not measured latency or CPU claims.
+
+### Settings ownership
+
+The Rust `settings catalog|get|test|save` CLI owns guided configuration editing.
+Draft JSON arrives on bounded stdin, not shell arguments. The Python boundary
+reads Moonlight's paired-host metadata, validates the full candidate config,
+and performs the existing authenticated app-list probe with an external display
+adapter. No setup operation prepares a host, writes recovery, starts the daemon,
+or launches a streaming client. Certificates and SSH details are not sent to Qt.
+
+A save merges only explicitly editable fields into the latest configuration.
+Existing computer IDs, pairing identities and window titles cannot be edited;
+other profiles and advanced display/SSH fields survive unchanged. Removed
+computers with saved sessions cannot be re-added through the wizard under a
+second recovery identity. Existing sessions retain their immutable config and
+profile snapshots, including during reconnect and recovery. Atomic config
+replacement lets a concurrent new connection read a complete old or new config;
+there is no new lock on the session worker or video path.
+
+An opaque content fingerprint detects stale drafts. Cooperative saves use a
+nonblocking file lock, recheck the revision under that lock, then fsync and
+atomically replace a private configuration file. Manual editors should honor
+`computers.lock`; uncooperative writes racing the final rename cannot be made
+transactional by an advisory lock. The fingerprint is a conflict detector, not
+an authentication token. Testing is required by the UI before saving; the CLI
+also permits validated offline saves for scripting. Test results prove only the
+pairing/network/app-list check, not actual streaming performance.
