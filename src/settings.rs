@@ -25,6 +25,50 @@ pub enum Action {
     Save,
     /// Remove a computer, its launcher entry, and its settled session record.
     Remove { computer: String },
+    /// List computers seen on Tailscale and the local network.
+    Discover,
+    /// Pair a host through Moonlight; JSON {"host","pin"} arrives on stdin.
+    Pair,
+    /// Read a host's displays over SSH for a JSON draft on stdin; changes nothing.
+    Inspect,
+    /// Install the Windows display helper for a JSON draft on stdin.
+    InstallHelper,
+}
+fn read_stdin() -> Result<Value> {
+    let mut input = String::new();
+    io::stdin().take(65537).read_to_string(&mut input)?;
+    if input.len() > 65536 {
+        bail!("settings request too large");
+    }
+    serde_json::from_str(&input).context("invalid settings JSON")
+}
+// Host inspection needs the pairing identity and SSH details. An existing
+// computer supplies them from its saved configuration; a draft may override
+// the editable fields but never the identity of a saved computer.
+fn subject(value: &Value, draft: &Value) -> Result<Value> {
+    let id = draft["computer"].as_str().context("missing computer ID")?;
+    if !storage::valid_id(id) {
+        bail!("invalid computer ID");
+    }
+    let mut computer = value["computers"]
+        .get(id)
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if computer.get("pairing_uuid").is_none() {
+        computer["pairing_uuid"] = draft["pairing_uuid"].clone();
+    }
+    for key in ["host", "platform"] {
+        if draft.get(key).is_some() {
+            computer[key] = draft[key].clone();
+        }
+    }
+    if let Some(ssh) = draft.get("ssh") {
+        computer["ssh"] = ssh.clone();
+    }
+    if computer["pairing_uuid"].as_str().is_none() {
+        bail!("choose a paired computer");
+    }
+    Ok(computer)
 }
 // A session record is only dropped once nothing owns it: no desired intent,
 // no live client, and no pending host recovery journal.
@@ -86,15 +130,22 @@ fn editable(id: &str, c: &Value, rev: &str) -> Value {
         }
     });
     let p = &c["profiles"][profile];
+    let mut ssh = serde_json::Map::new();
+    for key in ["user", "control_path", "alias"] {
+        if let Some(v) = c["ssh"].get(key) {
+            ssh.insert(key.into(), v.clone());
+        }
+    }
     json!({"computer":id,"revision":rev,"name":c["name"].as_str().unwrap_or_else(|| c["title"].as_str().unwrap_or(id).trim_end_matches(" - Moonlight")),
-        "host":c["host"],"platform":c["platform"].as_str().unwrap_or("unknown"),
+        "host":c["host"],"platform":c["platform"].as_str().unwrap_or("unknown"),"ssh":ssh,
+        "display":p.get("display").cloned().unwrap_or_else(|| json!({"adapter":"external"})),
         "profile":profile,"profiles":c["profiles"],"stream_resolution":p["stream_resolution"],
         "fps":p.get("fps").unwrap_or(&json!(60)),"bitrate":p.get("bitrate").unwrap_or(&json!(60000)),
         "codec":p.get("codec").unwrap_or(&json!("HEVC")),"input":p.get("input").unwrap_or(&json!("absolute")),
         "audio":p.get("audio").unwrap_or(&json!("focus"))})
 }
-// Only the common stream settings cross the UI boundary. Display adapters and
-// SSH details are deliberately omitted and preserved by the merge below.
+// Only the common stream settings and display recovery settings cross the UI
+// boundary; other profile fields are preserved by the merge below.
 fn redact_profiles(draft: &mut Value) {
     if let Some(profiles) = draft["profiles"].as_object_mut() {
         for p in profiles.values_mut() {
@@ -106,6 +157,7 @@ fn redact_profiles(draft: &mut Value) {
                     "codec",
                     "input",
                     "audio",
+                    "display",
                 ]
                 .contains(&k.as_str())
             });
@@ -184,6 +236,44 @@ async fn candidate(paths: &Paths, mut value: Value, draft: &Value) -> Result<Val
     ] {
         computer["profiles"][profile][key] = draft[key].clone();
     }
+    // SSH identity fields and the default profile's display recovery are
+    // editable; drafts without them leave the saved values untouched.
+    if let Some(ssh) = draft.get("ssh").and_then(Value::as_object) {
+        let mut kept = computer["ssh"].as_object().cloned().unwrap_or_default();
+        for key in ["user", "control_path", "alias"] {
+            match ssh.get(key) {
+                Some(Value::String(s)) if !s.is_empty() => {
+                    kept.insert(key.into(), json!(s));
+                }
+                _ => {
+                    kept.remove(key);
+                }
+            }
+        }
+        if kept.is_empty() {
+            computer.as_object_mut().unwrap().remove("ssh");
+        } else {
+            computer["ssh"] = Value::Object(kept);
+        }
+    }
+    if let Some(display) = draft.get("display").and_then(Value::as_object) {
+        let adapter = display
+            .get("adapter")
+            .and_then(Value::as_str)
+            .unwrap_or("external");
+        let mut next = serde_json::Map::new();
+        next.insert("adapter".into(), json!(adapter));
+        if adapter != "external" {
+            for key in ["uuid", "follow_main", "require_ac", "mode", "device_id"] {
+                if let Some(v) = display.get(key)
+                    && !v.is_null()
+                {
+                    next.insert(key.into(), v.clone());
+                }
+            }
+        }
+        computer["profiles"][profile]["display"] = Value::Object(next);
+    }
     computers.insert(id.into(), computer);
     host::call(json!({"operation":"validate-value","value":value})).await?;
     Ok(value)
@@ -255,21 +345,51 @@ pub async fn run(paths: &Paths, action: &Action) -> Result<Value> {
             }
             Ok(json!({"removed":true,"computer":computer,"launcher":launcher}))
         }
-        Action::Test | Action::Save => {
-            let mut input = String::new();
-            io::stdin().take(65537).read_to_string(&mut input)?;
-            if input.len() > 65536 {
-                bail!("settings request too large");
+        Action::Discover => {
+            let mut found = host::call(json!({"operation":"discover"})).await?;
+            for item in found["candidates"]
+                .as_array_mut()
+                .context("invalid discovery list")?
+            {
+                let paired = item["pairing_uuid"].as_str().map(str::to_owned);
+                item["configured"] = json!(paired.as_deref().is_some_and(|p| {
+                    value["computers"].as_object().unwrap().values().any(|c| {
+                        c["pairing_uuid"]
+                            .as_str()
+                            .is_some_and(|a| a.eq_ignore_ascii_case(p))
+                    })
+                }));
             }
-            let draft: Value = serde_json::from_str(&input).context("invalid settings JSON")?;
+            Ok(json!({"revision":revision(&value),"candidates":found["candidates"]}))
+        }
+        Action::Pair => {
+            let request = read_stdin()?;
+            let paired =
+                host::call(json!({"operation":"pair","host":request["host"],"pin":request["pin"]}))
+                    .await?;
+            Ok(json!({"revision":revision(&value),"paired":paired}))
+        }
+        Action::Inspect => {
+            let draft = read_stdin()?;
+            let computer = subject(&value, &draft)?;
+            host::call(json!({"operation":"inspect","computer":computer})).await
+        }
+        Action::InstallHelper => {
+            let draft = read_stdin()?;
+            let computer = subject(&value, &draft)?;
+            host::call(json!({"operation":"install-helper","computer":computer,"device_id":draft["device_id"]})).await
+        }
+        Action::Test | Action::Save => {
+            let draft = read_stdin()?;
             let next = candidate(paths, value, &draft).await?;
             if matches!(action, Action::Test) {
-                // An external adapter makes this strictly a pairing/network/app
-                // check, even when the saved profile manages the host display.
+                // The probe is read-only. With a managed adapter it also proves
+                // SSH and the chosen display without touching host settings.
                 let c = &next["computers"][draft["computer"].as_str().unwrap()];
-                host::call(json!({"operation":"setup-probe","computer":c})).await?;
+                let probe = host::call(json!({"operation":"setup-probe","computer":c})).await?;
                 Ok(
-                    json!({"tested":true,"message":"Moonlight authenticated and found Desktop. Video and input are checked when you connect."}),
+                    json!({"tested":true,"restoration":probe["restoration"],"display":probe["display"],
+                        "message":"Moonlight authenticated and found Desktop. Video and input are checked when you connect."}),
                 )
             } else {
                 storage::private_dir(paths.config.parent().context("missing config directory")?)?;

@@ -5,18 +5,24 @@ import QtQuick.Layouts
 Sheet {
     id: setup
     objectName: "setupDialog"
-    width: Math.min(parent.width - 48, 680)
-    height: Math.min(parent.height - 40, 660)
+    width: Math.min(parent.width - 48, 700)
+    height: Math.min(parent.height - 40, 700)
     // Escape and Cancel go through requestClose(), which asks before
     // discarding a draft. Nothing closes this dialog by accident.
     closePolicy: Popup.NoAutoClose
     onEscapeRequested: requestClose()
-    title: editing ? "Computer settings" : "Add a computer"
+    title: editing ? "Computer settings" : pairing ? "Pair a computer" : "Add a computer"
     topPadding: 0
     property bool editing: false
     property int step: 0
     property var draft: ({})
     property var paired: []
+    property var discovered: []
+    property bool discovering: false
+    property bool pairing: false
+    property string pin: ""
+    property var pairTarget: ({})
+    property var inspection: null
     property string revision: ""
     property string error: ""
     property string errorAction: ""
@@ -29,29 +35,57 @@ Sheet {
     signal saved(string computer)
     readonly property var steps: editing ? ["Settings", "Check & save"] : ["Computer", "Settings", "Check & save"]
     readonly property int stepIndex: editing ? step - 1 : step
-    readonly property bool dirty: editing ? edited : step > 0
+    readonly property bool dirty: editing ? edited : step > 0 || pairing
     readonly property bool conflict: error.indexOf("changed elsewhere") >= 0
     readonly property bool checking: manager.setupBusy && step === 2
+    readonly property string platform: draft.platform || "unknown"
+    readonly property var ssh: draft.ssh || ({})
+    readonly property var display: draft.display || ({adapter: "external"})
+    readonly property string adapter: display.adapter || "external"
+    readonly property bool managed: adapter !== "external"
+    readonly property bool recoverable: platform === "macos" || platform === "windows"
     readonly property string nameError: (draft.name || "").trim().length > 0 ? "" : "Enter a name for this computer."
     readonly property string hostError: /^[A-Za-z0-9][A-Za-z0-9.:-]{0,252}$/.test(draft.host || "") ? "" : "Enter a hostname or IP address using letters, digits, dots, colons, or dashes."
     readonly property string resolutionError: /^[0-9]{3,5}x[0-9]{3,5}$/.test(draft.stream_resolution || "") ? "" : "Use WIDTHxHEIGHT, for example 2560x1440."
-    readonly property bool valid: loaded && !nameError && !hostError && !resolutionError
+    readonly property string sshUserError: !managed || platform !== "macos" ? "" : /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(ssh.user || "") ? "" : "Enter the Mac's approved SSH user (letters, digits, dashes, underscores)."
+    readonly property string sshAliasError: !managed || platform !== "windows" ? "" : /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(ssh.alias || "") ? "" : "Enter the SSH alias for this PC from your ~/.ssh/config."
+    readonly property string displayError: adapter === "betterdisplay" && !(display.uuid && display.mode) ? "Read the Mac's displays and choose a display and mode."
+        : adapter === "windows" && !display.device_id ? "Inspect the PC and choose the capture display." : ""
+    readonly property bool valid: loaded && !nameError && !hostError && !resolutionError && !sshUserError && !sshAliasError && !displayError
     readonly property var presets: [{label: "Balanced · 1080p, 60 fps", res: "1920x1080", bitrate: 30000}, {label: "Sharper · 1440p, 60 fps", res: "2560x1440", bitrate: 45000}, {label: "Detailed · 4K, 60 fps", res: "3840x2160", bitrate: 80000}, {label: "Custom", res: "", bitrate: 0}]
     readonly property var codecs: [{label: "Automatic", value: "auto"}, {label: "HEVC (H.265)", value: "HEVC"}, {label: "H.264", value: "H.264"}, {label: "AV1", value: "AV1"}]
     readonly property var inputs: [{label: "Direct pointer", value: "absolute", hint: "The pointer lands exactly where you point. Best for desktop work."}, {label: "Relative pointer", value: "relative", hint: "Sends movement only. Needed by games that capture the mouse."}]
     readonly property var audios: [{label: "Play here, mute when unfocused", value: "focus", hint: "Sound plays on this computer and mutes while the desktop window is not active."}, {label: "Always play here", value: "continuous", hint: "Sound plays on this computer even while the window is in the background."}, {label: "Keep audio on the host", value: "host", hint: "Nothing plays here; the remote computer keeps its sound."}]
+    readonly property var adapters: platform === "macos"
+        ? [{label: "Leave the display alone", value: "external", hint: "Streams whatever the Mac shows. Nothing is changed or restored."},
+           {label: "Follow the main display", value: "macos", hint: "Keeps Sunshine capturing the Mac's main display through lid and monitor changes, over SSH. The display mode is never changed."},
+           {label: "Manage a display with BetterDisplay", value: "betterdisplay", hint: "Switches a chosen display to a streaming mode and restores it afterwards. Needs BetterDisplay on the Mac."}]
+        : platform === "windows"
+        ? [{label: "Leave the display alone", value: "external", hint: "Streams whatever the PC shows. Nothing is changed or restored."},
+           {label: "Managed with the console helper", value: "windows", hint: "A small helper on the PC switches to a virtual capture display for the session and restores the physical displays afterwards, even if this app is offline."}]
+        : [{label: "Leave the display alone", value: "external", hint: ""}]
     readonly property int presetIndex: {
         const i = ["1920x1080", "2560x1440", "3840x2160"].indexOf(draft.stream_resolution)
         return i >= 0 && draft.fps === 60 && draft.bitrate === presets[i].bitrate && (draft.codec || "auto") === "auto" ? i : 3
     }
+    readonly property var displays: inspection && inspection.displays ? inspection.displays : []
+    readonly property var chosenDisplay: displays.find(d => (adapter === "betterdisplay" ? d.uuid === display.uuid : (d.id || "").toLowerCase() === (display.device_id || "").toLowerCase())) || null
     function fieldError(key, message) { return message.length > 0 && (attempted || touched[key] === true) ? message : "" }
     function valueLabel(list, value) { for (const item of list) if (item.value === value) return item.label; return value || "" }
-    readonly property var summaryRows: [["Name", draft.name || ""], ["Address", draft.host || ""], ["Operating system", ({macos: "macOS", windows: "Windows", linux: "Linux"})[draft.platform] || "Not specified"], ["Quality", summary()], ["Mouse", valueLabel(inputs, draft.input || "absolute")], ["Audio", valueLabel(audios, draft.audio || "focus")]]
+    function modeLabel(m) { return m ? m.resolution + (m.hidpi ? " HiDPI" : "") + " · " + m.refresh + " Hz" : "" }
     function summary() { return (draft.stream_resolution || "") + " · " + (draft.fps || 60) + " fps · " + Math.round((draft.bitrate || 0) / 1000) + " Mbit/s · " + valueLabel(codecs, draft.codec || "auto") + " codec" }
+    function recoverySummary() {
+        if (adapter === "macos") return "Follows the main display over SSH as " + (ssh.user || "?")
+        if (adapter === "betterdisplay") return "Manages " + (chosenDisplay ? chosenDisplay.name : "a display") + " · " + modeLabel(display.mode) + " as " + (ssh.user || "?")
+        if (adapter === "windows") return "Console helper via " + (ssh.alias || "?") + " · capture " + (chosenDisplay ? chosenDisplay.name : display.device_id || "?")
+        return "Leaves the host display alone"
+    }
+    readonly property var summaryRows: [["Name", draft.name || ""], ["Address", draft.host || ""], ["Operating system", ({macos: "macOS", windows: "Windows", linux: "Linux"})[draft.platform] || "Not specified"], ["Quality", summary()], ["Mouse", valueLabel(inputs, draft.input || "absolute")], ["Audio", valueLabel(audios, draft.audio || "focus")], ["Display recovery", recoverySummary()]]
     function begin(computer) {
         if (manager.setupBusy) return
-        editing = !!computer; step = editing ? 1 : 0; draft = {}; paired = []
+        editing = !!computer; step = editing ? 1 : 0; draft = {}; paired = []; discovered = []; inspection = null
         error = ""; errorAction = ""; tested = false; loaded = false; advanced = false; edited = false; attempted = false; touched = {}
+        pairing = false; pin = ""; pairTarget = {}; discovering = !editing
         launcher.checked = !editing
         open()
         manager.setup(editing ? "get" : "catalog", computer ? {computer: computer} : {})
@@ -67,12 +101,46 @@ Sheet {
         const t = Object.assign({}, touched); t[key] = true; touched = t
         tested = false; error = ""; edited = true
     }
-    function choose(host) {
+    function setNested(group, key, value) {
+        const inner = Object.assign({}, draft[group] || {}); inner[key] = value
+        set(group, inner)
+    }
+    function setAdapter(value) {
+        const next = {adapter: value}
+        if (value !== "external") { if (display.require_ac !== undefined) next.require_ac = display.require_ac }
+        set("display", next)
+    }
+    function choose(host, platform) {
         const slug = host.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "computer"
         draft = {computer: slug + "-" + host.pairing_uuid.slice(0, 8), pairing_uuid: host.pairing_uuid,
-            revision: revision, name: host.name, host: host.host, platform: "unknown", profile: "desktop",
-            stream_resolution: "1920x1080", fps: 60, bitrate: 30000, codec: "auto", input: "absolute", audio: "focus"}
-        step = 1; tested = false; error = ""; attempted = false; touched = {}
+            revision: revision, name: host.name, host: host.host, platform: platform || "unknown", profile: "desktop",
+            stream_resolution: "1920x1080", fps: 60, bitrate: 30000, codec: "auto", input: "absolute", audio: "focus",
+            ssh: {}, display: {adapter: "external"}}
+        step = 1; pairing = false; tested = false; error = ""; attempted = false; touched = {}; inspection = null
+    }
+    function pickDiscovered(entry) {
+        if (entry.pairing_uuid) {
+            const known = paired.find(h => h.pairing_uuid === entry.pairing_uuid)
+            if (known && !known.configured) choose(known, entry.platform)
+            return
+        }
+        startPair({name: entry.name, host: entry.host, platform: entry.platform || "unknown"}, "")
+    }
+    function startPair(target, givenPin) {
+        if (manager.setupBusy) return
+        pairTarget = target; error = ""; errorAction = ""; pairing = true
+        pin = givenPin || String(1000 + Math.floor(Math.random() * 9000))
+        manager.setup("pair", {host: target.host, pin: pin})
+    }
+    function inspectHost() {
+        if (manager.setupBusy) return
+        error = ""
+        manager.setup("inspect", {computer: draft.computer, pairing_uuid: draft.pairing_uuid, host: draft.host, platform: platform, ssh: ssh})
+    }
+    function installHelper() {
+        if (manager.setupBusy) return
+        error = ""
+        manager.setup("install-helper", {computer: draft.computer, pairing_uuid: draft.pairing_uuid, host: draft.host, platform: platform, ssh: ssh, device_id: display.device_id})
     }
     function advance() {
         if (step !== 1) return
@@ -101,13 +169,35 @@ Sheet {
         target: manager
         function onSetupFinished(action, ok, result, message) {
             if (!setup.visible) return
+            if (action === "discover") { setup.discovering = false; if (ok) setup.discovered = result.candidates || []; return }
             if (!ok) { setup.error = message; setup.errorAction = action; return }
             setup.error = ""; setup.errorAction = ""
             if (action === "catalog") {
                 setup.paired = result.paired; setup.revision = result.revision; setup.loaded = true
                 if (setup.step > 0) { const next = Object.assign({}, setup.draft); next.revision = result.revision; setup.draft = next }
+                else if (setup.discovering) manager.setup("discover")
             }
             if (action === "get") { setup.draft = result; setup.loaded = true; setup.edited = false }
+            if (action === "pair") {
+                setup.revision = result.revision || setup.revision
+                const p = result.paired
+                setup.choose({name: p.name, host: p.host || setup.pairTarget.host, pairing_uuid: p.pairing_uuid}, setup.pairTarget.platform)
+            }
+            if (action === "inspect") {
+                setup.inspection = result
+                // Preselect the obvious candidate so the form reads as complete.
+                const list = result.displays || []
+                if (setup.adapter === "betterdisplay" && !setup.display.uuid) {
+                    const d = list.find(x => x.uuid && x.main) || list.find(x => x.uuid)
+                    if (d) { setup.setNested("display", "uuid", d.uuid); setup.setNested("display", "mode", d.current || (d.modes && d.modes.length ? d.modes[0] : null)) }
+                }
+                if (setup.adapter === "windows" && !setup.display.device_id) {
+                    const d = list.find(x => x.available && !x.internal && !x.active) || list.find(x => x.available && !x.internal) || list[0]
+                    if (d) setup.setNested("display", "device_id", d.id)
+                }
+                revealLater.start()
+            }
+            if (action === "install-helper") setup.inspectHost()
             if (action === "test") setup.tested = true
             if (action === "save") {
                 const id = setup.draft.computer
@@ -117,7 +207,10 @@ Sheet {
         }
     }
     Confirm { id: discard; parent: Overlay.overlay }
+    // Bring the freshly listed displays into view once an inspection lands.
+    Timer { id: revealLater; interval: 60; onTriggered: setup.reveal(setup.platform === "windows" ? deviceChoice : displayChoice) }
     component Body: Label { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WordWrap; color: theme.colors.secondary; lineHeight: 1.25 }
+    component Section: Label { color: theme.colors.muted; font.pointSize: theme.type.caption; font.letterSpacing: 1.1; font.weight: Font.DemiBold }
     component FieldLabel: Label { color: theme.colors.text; font.pointSize: theme.type.caption; font.weight: Font.Medium }
     component Hint: Label { Layout.fillWidth: true; wrapMode: Text.WordWrap; color: theme.colors.muted; font.pointSize: theme.type.caption }
     component Problem: Label { Layout.fillWidth: true; visible: text.length > 0; wrapMode: Text.WordWrap; color: theme.colors.danger; font.pointSize: theme.type.caption; Accessible.role: Accessible.AlertMessage }
@@ -134,9 +227,22 @@ Sheet {
     }
     component Input: Field { onActiveFocusChanged: if (activeFocus) setup.reveal(this) }
     component Choice: Select { onActiveFocusChanged: if (activeFocus) setup.reveal(this) }
+    component Card: Rectangle {
+        default property alias content: cardColumn.data
+        Layout.fillWidth: true; radius: 12; color: theme.colors.surface; border.color: theme.colors.border
+        implicitHeight: cardColumn.implicitHeight + 32
+        ColumnLayout { id: cardColumn; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 16; spacing: 8 }
+    }
+    component Warning: Rectangle {
+        default property alias content: warnColumn.data
+        Layout.fillWidth: true; radius: 12; color: theme.colors.warningBg; border.color: theme.colors.warningBorder
+        implicitHeight: warnColumn.implicitHeight + 32
+        ColumnLayout { id: warnColumn; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 16; spacing: 8 }
+    }
 
     // Step indicator: done, current, and upcoming steps are visibly different.
     RowLayout {
+        visible: !setup.pairing
         Layout.fillWidth: true; Layout.topMargin: 6; spacing: 0
         Repeater {
             model: setup.steps
@@ -168,46 +274,66 @@ Sheet {
         ColumnLayout {
             id: pages
             width: scroll.availableWidth; spacing: 16
-            // Step: choose a paired computer.
+            // Pairing page: the PIN and where to type it.
             ColumnLayout {
-                visible: setup.step === 0
-                Layout.fillWidth: true; spacing: 14
-                Body { text: "Choose a computer you have paired in Moonlight."; color: theme.colors.text; font.pointSize: theme.type.lead }
+                visible: setup.pairing
+                Layout.fillWidth: true; Layout.topMargin: 6; spacing: 14
+                Body { text: "Pair with " + (setup.pairTarget.name || setup.pairTarget.host || ""); color: theme.colors.text; font.pointSize: theme.type.lead }
+                Body { text: "Sunshine on " + (setup.pairTarget.host || "the host") + " is waiting for this PIN." }
+                Rectangle {
+                    Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 6
+                    implicitWidth: pinLabel.implicitWidth + 48; implicitHeight: pinLabel.implicitHeight + 28; radius: 14
+                    color: theme.colors.selected; border.color: theme.colors.selectedBorder
+                    Label { id: pinLabel; objectName: "setupPin"; anchors.centerIn: parent; text: setup.pin.split("").join(" "); color: theme.colors.text; font.pointSize: theme.type.title; font.weight: Font.DemiBold; font.letterSpacing: 4; Accessible.name: "Pairing PIN " + setup.pin }
+                }
+                Repeater {
+                    model: ["On " + (setup.pairTarget.name || "the host") + ", open Sunshine's web interface at https://" + (setup.pairTarget.host || "host") + ":47990/pin", "Sign in and enter the PIN shown above.", "Keep this window open. Pairing finishes on its own."]
+                    delegate: RowLayout {
+                        required property string modelData
+                        required property int index
+                        Layout.fillWidth: true; spacing: 12
+                        Rectangle { width: 24; height: 24; radius: 12; color: theme.colors.selected; border.color: theme.colors.selectedBorder; Layout.alignment: Qt.AlignTop; Label { anchors.centerIn: parent; text: index + 1; color: theme.colors.accentText; font.pointSize: theme.type.caption; font.weight: Font.DemiBold } }
+                        Body { text: modelData; color: theme.colors.text }
+                    }
+                }
                 ColumnLayout {
-                    visible: manager.setupBusy && !setup.paired.length
+                    visible: manager.setupBusy
+                    Layout.fillWidth: true; spacing: 10
+                    Body { text: "Waiting for the PIN to be entered on the host…" }
+                    Progress { active: parent.visible }
+                }
+                Warning {
+                    visible: setup.error.length > 0 && setup.errorAction === "pair"
+                    RowLayout { spacing: 10; Icon { glyph: "alert"; color: theme.colors.warning } Label { Layout.fillWidth: true; text: "Pairing did not complete"; color: theme.colors.warning; font.weight: Font.DemiBold } }
+                    Body { objectName: "pairError"; text: setup.error; color: theme.colors.warning }
+                    RowLayout { Layout.topMargin: 4; spacing: 8
+                        ActionButton { text: "Try again with a new PIN"; icon.source: "qrc:/qml/icons/refresh.svg"; enabled: !manager.setupBusy; onClicked: setup.startPair(setup.pairTarget, "") }
+                    }
+                }
+                Hint { text: "Moonlight keeps the pairing and its certificates. Close the Moonlight window before pairing so it cannot overwrite the result." }
+            }
+            // Step: choose a paired computer or pair a new one.
+            ColumnLayout {
+                visible: setup.step === 0 && !setup.pairing
+                Layout.fillWidth: true; spacing: 14
+                Body { text: "Choose a computer."; color: theme.colors.text; font.pointSize: theme.type.lead }
+                ColumnLayout {
+                    visible: manager.setupBusy && !setup.loaded
                     Layout.fillWidth: true; spacing: 10
                     Body { text: "Looking for paired computers…" }
                     Progress { active: parent.visible }
                 }
-                ColumnLayout {
-                    visible: setup.loaded && !setup.paired.length && !manager.setupBusy
-                    Layout.fillWidth: true; spacing: 10
-                    Rectangle {
-                        Layout.fillWidth: true; radius: 12; color: theme.colors.surface; border.color: theme.colors.border
-                        implicitHeight: emptyColumn.implicitHeight + 36
-                        ColumnLayout {
-                            id: emptyColumn
-                            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 18; spacing: 8
-                            Label { text: "No paired computers found"; color: theme.colors.text; font.weight: Font.DemiBold }
-                            Body { text: "Pair your computer in Moonlight first: add it there, enter the PIN on the host, and confirm that its apps appear. Then refresh this list." }
-                            RowLayout {
-                                Layout.topMargin: 6; spacing: 8
-                                ActionButton { visible: manager.moonlightAvailable || manager.demo; icon.source: "qrc:/qml/icons/external.svg"; text: "Open Moonlight"; onClicked: manager.openMoonlight() }
-                                ActionButton { quiet: true; icon.source: "qrc:/qml/icons/refresh.svg"; text: "Refresh list"; enabled: !manager.setupBusy; onClicked: manager.setup("catalog") }
-                            }
-                        }
-                    }
-                }
+                Section { visible: setup.paired.length > 0; text: "PAIRED IN MOONLIGHT" }
                 Repeater {
                     model: setup.paired
                     delegate: ItemDelegate {
                         id: candidate
                         required property var modelData
-                        Layout.fillWidth: true; implicitHeight: 66
+                        Layout.fillWidth: true; implicitHeight: 62
                         hoverEnabled: true
                         enabled: !modelData.configured && !manager.setupBusy
                         Accessible.name: modelData.name + (modelData.configured ? ", already added" : "")
-                        onClicked: setup.choose(modelData)
+                        onClicked: setup.choose(modelData, (setup.discovered.find(d => d.pairing_uuid === modelData.pairing_uuid) || {}).platform)
                         background: Rectangle {
                             radius: 10
                             color: !candidate.enabled ? theme.colors.disabled : candidate.hovered ? theme.colors.hover : theme.colors.surface
@@ -223,13 +349,67 @@ Sheet {
                                 Label { textFormat: Text.PlainText; text: candidate.modelData.name; color: candidate.enabled ? theme.colors.text : theme.colors.disabledText; font.weight: Font.DemiBold; elide: Text.ElideRight; Layout.fillWidth: true }
                                 Label { textFormat: Text.PlainText; text: candidate.modelData.configured ? "Already added. Edit it from your computer list." : candidate.modelData.host || "You will enter its address next"; color: candidate.enabled ? theme.colors.secondary : theme.colors.disabledText; font.pointSize: theme.type.caption; elide: Text.ElideRight; Layout.fillWidth: true }
                             }
-                            Icon { visible: candidate.enabled; glyph: "chevron-down"; rotation: -90; color: theme.colors.muted }
+                            Icon { visible: candidate.enabled; glyph: "chevron-right"; color: theme.colors.muted }
                         }
                     }
                 }
-                Hint { visible: setup.paired.length > 0; text: "Pairing and certificates stay in Moonlight. Remote Desktops uses the same trusted computer." }
+                Section { visible: setup.loaded; Layout.topMargin: setup.paired.length > 0 ? 8 : 0; text: "PAIR A NEW COMPUTER" }
+                Body { visible: setup.loaded; text: "Computers reachable through Tailscale and on your network. Pairing goes through Moonlight and stays there." }
+                ColumnLayout {
+                    visible: setup.discovering
+                    Layout.fillWidth: true; spacing: 10
+                    Body { text: "Looking on Tailscale and the local network…"; font.pointSize: theme.type.caption }
+                    Progress { active: parent.visible }
+                }
+                Repeater {
+                    model: setup.discovered.filter(d => !d.pairing_uuid || !d.configured)
+                    delegate: ItemDelegate {
+                        id: found
+                        required property var modelData
+                        readonly property bool alreadyPaired: !!modelData.pairing_uuid
+                        Layout.fillWidth: true; implicitHeight: 62
+                        hoverEnabled: true
+                        enabled: !manager.setupBusy
+                        Accessible.name: modelData.name + ", " + (found.alreadyPaired ? "paired" : modelData.online ? "online" : "offline")
+                        onClicked: setup.pickDiscovered(modelData)
+                        background: Rectangle {
+                            radius: 10
+                            color: found.hovered ? theme.colors.hover : theme.colors.surface
+                            border.width: found.visualFocus ? 2 : 1
+                            border.color: found.visualFocus ? theme.colors.accent : theme.colors.border
+                            Behavior on color { ColorAnimation { duration: 120 } }
+                        }
+                        contentItem: RowLayout {
+                            spacing: 14
+                            ComputerGlyph { laptop: found.modelData.platform === "macos" || found.modelData.platform === "windows"; ink: theme.colors.secondary }
+                            ColumnLayout {
+                                Layout.fillWidth: true; spacing: 3
+                                RowLayout {
+                                    spacing: 8
+                                    Label { textFormat: Text.PlainText; text: found.modelData.name; color: theme.colors.text; font.weight: Font.DemiBold; elide: Text.ElideRight }
+                                    Rectangle { radius: 5; implicitHeight: 18; implicitWidth: sourceLabel.implicitWidth + 12; color: theme.colors.selected; Label { id: sourceLabel; anchors.centerIn: parent; text: found.modelData.source === "tailscale" ? "Tailscale" : "Local network"; color: theme.colors.accentText; font.pointSize: theme.type.caption } }
+                                }
+                                RowLayout {
+                                    spacing: 7
+                                    Rectangle { width: 8; height: 8; radius: 4; color: found.modelData.online ? theme.colors.success : "transparent"; border.width: found.modelData.online ? 0 : 1.5; border.color: theme.colors.muted }
+                                    Label { textFormat: Text.PlainText; Layout.fillWidth: true; text: (found.modelData.online ? "Online" : "Offline") + " · " + found.modelData.host + (found.modelData.platform ? " · " + ({macos: "macOS", windows: "Windows", linux: "Linux"})[found.modelData.platform] : ""); color: theme.colors.secondary; font.pointSize: theme.type.caption; elide: Text.ElideRight }
+                                }
+                            }
+                            Label { text: found.alreadyPaired ? "Paired" : "Pair"; color: found.alreadyPaired ? theme.colors.success : theme.colors.accentText; font.weight: Font.Medium }
+                            Icon { glyph: "chevron-right"; color: theme.colors.muted }
+                        }
+                    }
+                }
+                Body { visible: setup.loaded && !setup.discovering && !setup.discovered.length; text: "Nothing was found. Enter the computer's address below." ; font.pointSize: theme.type.caption }
+                RowLayout {
+                    visible: setup.loaded
+                    Layout.fillWidth: true; spacing: 8
+                    Input { id: manualHost; objectName: "setupManualHost"; Layout.fillWidth: true; placeholderText: "Hostname, Tailscale name, or IP address"; maximumLength: 253; Accessible.name: "Computer address"; onAccepted: if (manualPair.enabled) manualPair.clicked() }
+                    ActionButton { id: manualPair; text: "Pair"; icon.source: "qrc:/qml/icons/play.svg"; enabled: !manager.setupBusy && /^[A-Za-z0-9][A-Za-z0-9.:-]{0,252}$/.test(manualHost.text); onClicked: setup.startPair({name: manualHost.text, host: manualHost.text, platform: "unknown"}, "") }
+                }
+                Hint { visible: setup.loaded; text: "The host needs Sunshine running. Tailscale names, local names, and IP addresses all work." }
             }
-            // Step: name, address, and quality.
+            // Step: name, address, quality, and display recovery.
             ColumnLayout {
                 visible: setup.step === 1 && setup.loaded
                 enabled: !manager.setupBusy
@@ -247,7 +427,7 @@ Sheet {
                     ColumnLayout {
                         Layout.fillWidth: true; spacing: 8
                         FieldLabel { text: "Operating system" }
-                        Choice { Layout.fillWidth: true; model: [{label: "Not specified", value: "unknown"}, {label: "macOS", value: "macos"}, {label: "Windows", value: "windows"}, {label: "Linux", value: "linux"}]; textRole: "label"; valueRole: "value"; currentIndex: Math.max(0, ["unknown", "macos", "windows", "linux"].indexOf(setup.draft.platform)); Accessible.name: "Operating system"; onActivated: setup.set("platform", currentValue) }
+                        Choice { objectName: "setupPlatform"; Layout.fillWidth: true; model: [{label: "Not specified", value: "unknown"}, {label: "macOS", value: "macos"}, {label: "Windows", value: "windows"}, {label: "Linux", value: "linux"}]; textRole: "label"; valueRole: "value"; currentIndex: Math.max(0, ["unknown", "macos", "windows", "linux"].indexOf(setup.draft.platform)); Accessible.name: "Operating system"; onActivated: { setup.set("platform", currentValue); if (setup.managed) setup.setAdapter("external") } }
                     }
                     ColumnLayout {
                         Layout.fillWidth: true; spacing: 8
@@ -264,6 +444,7 @@ Sheet {
                                     setup.set("profile", currentText)
                                     for (const key of ["stream_resolution", "fps", "bitrate", "codec", "input", "audio"])
                                         setup.set(key, p[key] === undefined ? ({fps: 60, bitrate: 60000, codec: "HEVC", input: "absolute", audio: "focus"})[key] : p[key])
+                                    setup.set("display", p.display || {adapter: "external"})
                                 } else if (currentIndex === 3) setup.advanced = true
                                 else {
                                     setup.set("fps", 60); setup.set("codec", "auto")
@@ -272,6 +453,91 @@ Sheet {
                                 }
                             }
                         }
+                    }
+                }
+                // Display recovery: only for platforms with a managed adapter.
+                Section { visible: setup.recoverable; Layout.topMargin: 14; text: "DISPLAY RECOVERY" }
+                Choice { objectName: "setupAdapter"; visible: setup.recoverable; Layout.fillWidth: true; model: setup.adapters; textRole: "label"; valueRole: "value"; currentIndex: Math.max(0, setup.adapters.map(a => a.value).indexOf(setup.adapter)); Accessible.name: "Display recovery"; onActivated: setup.setAdapter(currentValue) }
+                Hint { visible: setup.recoverable; text: setup.valueLabel(setup.adapters.map(a => ({label: a.hint, value: a.value})), setup.adapter) }
+                ColumnLayout {
+                    visible: setup.recoverable && setup.managed && setup.platform === "macos"
+                    Layout.fillWidth: true; spacing: 8
+                    FieldLabel { Layout.topMargin: 6; text: "SSH user on the Mac" }
+                    Input { objectName: "setupSshUser"; Layout.fillWidth: true; text: setup.ssh.user || ""; placeholderText: "An account with key-based SSH access"; maximumLength: 64; invalid: setup.fieldError("ssh", setup.sshUserError).length > 0; Accessible.name: "SSH user"; onTextEdited: setup.setNested("ssh", "user", text) }
+                    Problem { text: setup.fieldError("ssh", setup.sshUserError) }
+                    Hint { text: "Remote Desktops runs read-only checks and display restores over SSH as this user, using your existing keys and known hosts. No password is stored." }
+                    Check { text: "Require AC power before streaming"; checked: !!setup.display.require_ac; onToggled: setup.setNested("display", "require_ac", checked) }
+                    ColumnLayout {
+                        visible: setup.adapter === "betterdisplay"
+                        Layout.fillWidth: true; spacing: 8
+                        RowLayout {
+                            Layout.topMargin: 4; spacing: 8
+                            ActionButton { objectName: "setupInspect"; text: setup.inspection ? "Read displays again" : "Read the Mac's displays"; icon.source: "qrc:/qml/icons/monitor.svg"; enabled: !manager.setupBusy && !setup.sshUserError; onClicked: setup.inspectHost() }
+                            Body { visible: manager.setupBusy && setup.errorAction !== "inspect" && !setup.inspection; text: "Reading over SSH…"; font.pointSize: theme.type.caption }
+                        }
+                        Hint { visible: !setup.inspection && !setup.attempted; text: "Read the displays to choose which one to manage and which mode to stream." }
+                        Problem { text: setup.attempted ? setup.displayError : "" }
+                        ColumnLayout {
+                            visible: setup.inspection && setup.inspection.platform === "macos"
+                            Layout.fillWidth: true; spacing: 8
+                            Hint { visible: setup.inspection && setup.inspection.betterdisplay === false; text: "BetterDisplay was not found on the Mac; install it to manage a display mode."; color: theme.colors.warning }
+                            FieldLabel { text: "Display to manage" }
+                            Choice {
+                                id: displayChoice
+                                objectName: "setupDisplay"
+                                Layout.fillWidth: true
+                                model: setup.displays.filter(d => d.uuid)
+                                textRole: "name"
+                                currentIndex: Math.max(0, setup.displays.filter(d => d.uuid).map(d => d.uuid).indexOf(setup.display.uuid))
+                                Accessible.name: "Display to manage"
+                                onActivated: { const d = setup.displays.filter(d => d.uuid)[currentIndex]; setup.setNested("display", "uuid", d.uuid); setup.setNested("display", "mode", d.current || (d.modes.length ? d.modes[0] : null)) }
+                            }
+                            FieldLabel { text: "Streaming mode" }
+                            Choice {
+                                Layout.fillWidth: true
+                                readonly property var modes: setup.chosenDisplay && setup.chosenDisplay.modes ? setup.chosenDisplay.modes : []
+                                model: modes.map(m => ({label: setup.modeLabel(m), mode: m}))
+                                textRole: "label"
+                                currentIndex: Math.max(0, modes.map(m => setup.modeLabel(m)).indexOf(setup.modeLabel(setup.display.mode)))
+                                Accessible.name: "Streaming mode"
+                                onActivated: setup.setNested("display", "mode", model[currentIndex].mode)
+                            }
+                            Check { text: "Follow the main display if it changes"; checked: !!setup.display.follow_main; onToggled: setup.setNested("display", "follow_main", checked) }
+                            Hint { text: "The chosen mode is applied when a session starts and the original mode is restored when it ends. A manual change on the Mac is never overwritten." }
+                        }
+                    }
+                }
+                ColumnLayout {
+                    visible: setup.recoverable && setup.managed && setup.platform === "windows"
+                    Layout.fillWidth: true; spacing: 8
+                    FieldLabel { Layout.topMargin: 6; text: "SSH alias for the PC" }
+                    Input { objectName: "setupSshAlias"; Layout.fillWidth: true; text: setup.ssh.alias || ""; placeholderText: "A Host entry in ~/.ssh/config with key access"; maximumLength: 64; invalid: setup.fieldError("ssh", setup.sshAliasError).length > 0; Accessible.name: "SSH alias"; onTextEdited: setup.setNested("ssh", "alias", text) }
+                    Problem { text: setup.fieldError("ssh", setup.sshAliasError) }
+                    Hint { text: "The alias must reach an administrator account on the PC over OpenSSH. Sunshine must already capture a virtual display, named in its output_name setting." }
+                    RowLayout {
+                        Layout.topMargin: 4; spacing: 8
+                        ActionButton { objectName: "setupInspect"; text: setup.inspection ? "Inspect again" : "Inspect the PC"; icon.source: "qrc:/qml/icons/monitor.svg"; enabled: !manager.setupBusy && !setup.sshAliasError; onClicked: setup.inspectHost() }
+                        ActionButton { objectName: "setupInstall"; visible: !!(setup.inspection && setup.inspection.helper && !setup.inspection.helper.installed); text: "Install the helper"; icon.source: "qrc:/qml/icons/play.svg"; enabled: !manager.setupBusy && !!setup.display.device_id; hint: "Installs the recovery helper on the PC over SSH; needs an administrator account"; onClicked: setup.installHelper() }
+                    }
+                    Hint { visible: !setup.inspection && !setup.attempted; text: "Inspect the PC to list its displays, Sunshine's capture output, and whether the helper is installed." }
+                    Problem { text: setup.attempted ? setup.displayError : "" }
+                    ColumnLayout {
+                        visible: setup.inspection && setup.inspection.platform === "windows"
+                        Layout.fillWidth: true; spacing: 8
+                        Hint { text: "Sunshine output: " + (setup.inspection && setup.inspection.sunshine_output ? setup.inspection.sunshine_output : "not set") + " · Helper: " + (setup.inspection && setup.inspection.helper && setup.inspection.helper.installed ? "installed" + (setup.inspection.helper.fresh === false ? " (not running)" : "") : "not installed") }
+                        Hint { visible: !!(setup.inspection && !setup.inspection.sunshine_output); text: "Set output_name in Sunshine's configuration to the virtual display before installing the helper."; color: theme.colors.warning }
+                        FieldLabel { text: "Capture display for streaming" }
+                        Choice {
+                            id: deviceChoice
+                            objectName: "setupDevice"
+                            Layout.fillWidth: true
+                            model: setup.displays.map(d => ({label: d.name + (d.hardware ? " · " + d.hardware : "") + (d.internal ? " · built-in" : "") + (d.active ? " · active" : ""), id: d.id}))
+                            textRole: "label"
+                            currentIndex: Math.max(0, setup.displays.map(d => (d.id || "").toLowerCase()).indexOf((setup.display.device_id || "").toLowerCase()))
+                            Accessible.name: "Capture display"
+                            onActivated: setup.setNested("display", "device_id", model[currentIndex].id)
+                        }
+                        Hint { text: "Choose the virtual display Sunshine captures, not a physical panel. During a session only that display stays active; the helper restores the others afterwards." }
                     }
                 }
                 ActionButton {
@@ -308,8 +574,11 @@ Sheet {
                         Choice { id: audioChoice; Layout.fillWidth: true; model: setup.audios; textRole: "label"; valueRole: "value"; currentIndex: Math.max(0, setup.audios.map(c => c.value).indexOf(setup.draft.audio || "focus")); Accessible.name: "Audio"; onActivated: setup.set("audio", currentValue) }
                         Hint { text: setup.audios[audioChoice.currentIndex].hint }
                     }
+                    FieldLabel { visible: setup.managed && setup.platform === "macos"; text: "SSH control socket (optional)" }
+                    Item { visible: setup.managed && setup.platform === "macos" }
+                    Input { visible: setup.managed && setup.platform === "macos"; Layout.fillWidth: true; Layout.columnSpan: 2; text: setup.ssh.control_path || ""; placeholderText: "/path/to/ssh-control-socket"; Accessible.name: "SSH control socket path"; onTextEdited: setup.setNested("ssh", "control_path", text) }
                 }
-                Hint { Layout.topMargin: 8; text: setup.editing ? "Display management for this computer is preserved. Changes apply after disconnecting and starting a new connection." : "The host keeps its current display settings. You can tune stream quality later." }
+                Hint { Layout.topMargin: 8; text: setup.editing ? "Changes apply after disconnecting and starting a new connection." : "You can tune stream quality and recovery later from Edit." }
             }
             ColumnLayout {
                 visible: setup.step === 1 && !setup.loaded
@@ -322,13 +591,9 @@ Sheet {
                 visible: setup.step === 2
                 Layout.fillWidth: true; spacing: 16
                 Body { text: setup.tested ? (setup.editing ? "Your changes are ready to save." : "Ready to add this computer.") : setup.checking ? "Checking the connection…" : "Checking the connection"; color: theme.colors.text; font.pointSize: theme.type.lead }
-                Rectangle {
-                    Layout.fillWidth: true; radius: 12; color: theme.colors.surface; border.color: theme.colors.border
-                    implicitHeight: summaryGrid.implicitHeight + 32
+                Card {
                     GridLayout {
-                        id: summaryGrid
-                        anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 16
-                        columns: 2; columnSpacing: 20; rowSpacing: 8
+                        Layout.fillWidth: true; columns: 2; columnSpacing: 20; rowSpacing: 8
                         // Fixed count: values update in place rather than rebuilding delegates.
                         Repeater {
                             model: setup.summaryRows.length * 2
@@ -346,7 +611,7 @@ Sheet {
                 ColumnLayout {
                     visible: setup.checking
                     Layout.fillWidth: true; spacing: 10
-                    Body { text: "Checking reachability, Moonlight pairing, and the Desktop app. This does not start a stream or change the host display." }
+                    Body { text: setup.managed ? "Checking reachability, Moonlight pairing, the Desktop app, and the display over SSH. Nothing on the host is changed." : "Checking reachability, Moonlight pairing, and the Desktop app. This does not start a stream or change the host display." }
                     Progress { active: parent.visible }
                 }
                 RowLayout {
@@ -355,28 +620,22 @@ Sheet {
                     Icon { glyph: "check"; color: theme.colors.success; Layout.alignment: Qt.AlignTop; Layout.topMargin: 2 }
                     ColumnLayout {
                         Layout.fillWidth: true; spacing: 4
-                        Label { text: "Connection check passed"; color: theme.colors.success; font.weight: Font.DemiBold }
-                        Body { text: manager.demo ? "Simulated check. No real computer was contacted." : "Moonlight authenticated and found the Desktop app. Video and input are verified when you connect." }
+                        Label { text: setup.managed ? "Connection and display checks passed" : "Connection check passed"; color: theme.colors.success; font.weight: Font.DemiBold }
+                        Body { text: manager.demo ? "Simulated check. No real computer was contacted." : (setup.managed ? "Moonlight authenticated, the Desktop app is listed, and the host answered over SSH. " : "Moonlight authenticated and found the Desktop app. ") + "Video and input are verified when you connect." }
                     }
                 }
-                Rectangle {
+                Warning {
                     visible: setup.error.length > 0 && setup.step === 2
-                    Layout.fillWidth: true; radius: 12; color: theme.colors.warningBg; border.color: theme.colors.warningBorder
-                    implicitHeight: problemColumn.implicitHeight + 32
-                    ColumnLayout {
-                        id: problemColumn
-                        anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 16; spacing: 8
-                        RowLayout {
-                            spacing: 10
-                            Icon { glyph: "alert"; color: theme.colors.warning }
-                            Label { Layout.fillWidth: true; text: setup.conflict ? "Settings changed elsewhere" : setup.errorAction === "save" ? "The computer could not be saved" : "The connection check failed"; color: theme.colors.warning; font.weight: Font.DemiBold; wrapMode: Text.WordWrap }
-                        }
-                        Body { objectName: "setupError"; text: setup.conflict ? (setup.editing ? "Another editor saved this configuration first. Reload to continue from the latest saved settings; your edits here will be replaced." : "Another editor saved the configuration first. Reload to continue with your draft.") : setup.error; color: theme.colors.warning }
-                        RowLayout {
-                            Layout.topMargin: 4; spacing: 8
-                            ActionButton { visible: setup.conflict; text: "Reload"; icon.source: "qrc:/qml/icons/refresh.svg"; enabled: !manager.setupBusy; onClicked: setup.reload() }
-                            ActionButton { visible: !setup.conflict; text: "Check again"; icon.source: "qrc:/qml/icons/refresh.svg"; enabled: !manager.setupBusy; onClicked: setup.check() }
-                        }
+                    RowLayout {
+                        spacing: 10
+                        Icon { glyph: "alert"; color: theme.colors.warning }
+                        Label { Layout.fillWidth: true; text: setup.conflict ? "Settings changed elsewhere" : setup.errorAction === "save" ? "The computer could not be saved" : "The connection check failed"; color: theme.colors.warning; font.weight: Font.DemiBold; wrapMode: Text.WordWrap }
+                    }
+                    Body { objectName: "setupError"; text: setup.conflict ? (setup.editing ? "Another editor saved this configuration first. Reload to continue from the latest saved settings; your edits here will be replaced." : "Another editor saved the configuration first. Reload to continue with your draft.") : setup.error; color: theme.colors.warning }
+                    RowLayout {
+                        Layout.topMargin: 4; spacing: 8
+                        ActionButton { visible: setup.conflict; text: "Reload"; icon.source: "qrc:/qml/icons/refresh.svg"; enabled: !manager.setupBusy; onClicked: setup.reload() }
+                        ActionButton { visible: !setup.conflict; text: "Check again"; icon.source: "qrc:/qml/icons/refresh.svg"; enabled: !manager.setupBusy; onClicked: setup.check() }
                     }
                 }
                 Check { id: launcher; text: setup.editing ? "Update the app launcher entry" : "Add to the app launcher"; checked: true; enabled: !manager.setupBusy }
@@ -384,9 +643,9 @@ Sheet {
             }
         }
     }
-    // Errors outside the check step stay near the controls that caused them.
+    // Errors outside the check and pairing pages stay near the controls that caused them.
     Rectangle {
-        visible: setup.error.length > 0 && setup.step !== 2
+        visible: setup.error.length > 0 && setup.step !== 2 && !setup.pairing
         Layout.fillWidth: true; radius: 10; color: theme.colors.warningBg; border.color: theme.colors.warningBorder
         implicitHeight: earlyError.implicitHeight + 24
         RowLayout {
@@ -401,11 +660,11 @@ Sheet {
     ActionButton { objectName: "setupTest"; visible: false; text: "Check again"; onClicked: setup.check() }
     footer: Sheet.Footer {
         ActionButton { text: "Cancel"; enabled: !manager.setupBusy; onClicked: setup.requestClose() }
-        ActionButton { visible: setup.step === 0; quiet: true; icon.source: "qrc:/qml/icons/refresh.svg"; text: "Refresh list"; enabled: !manager.setupBusy; onClicked: manager.setup("catalog") }
+        ActionButton { visible: setup.step === 0 && !setup.pairing; quiet: true; icon.source: "qrc:/qml/icons/refresh.svg"; text: "Refresh list"; enabled: !manager.setupBusy; onClicked: { setup.discovering = true; manager.setup("catalog") } }
         Item { Layout.fillWidth: true }
-        ActionButton { text: "Back"; icon.source: "qrc:/qml/icons/arrow-left.svg"; visible: setup.step > (setup.editing ? 1 : 0); enabled: !manager.setupBusy; onClicked: { setup.step--; setup.error = "" } }
+        ActionButton { text: "Back"; icon.source: "qrc:/qml/icons/arrow-left.svg"; visible: setup.pairing || setup.step > (setup.editing ? 1 : 0); enabled: !manager.setupBusy; onClicked: { if (setup.pairing) { setup.pairing = false; setup.error = "" } else { setup.step--; setup.error = "" } } }
         ActionButton {
-            objectName: "setupNext"; primary: true; visible: setup.step > 0
+            objectName: "setupNext"; primary: true; visible: setup.step > 0 && !setup.pairing
             text: setup.step === 2 ? "Save computer" : "Continue"
             icon.source: setup.step === 2 ? "qrc:/qml/icons/check.svg" : ""
             enabled: !manager.setupBusy && setup.loaded && (setup.step !== 2 || setup.tested)

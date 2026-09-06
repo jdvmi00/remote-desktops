@@ -44,7 +44,9 @@ the same intermediate phases a real session reports. The example computers are
 synthetic. `--state` supports `idle`, `connecting`, `preflight`, `running`,
 `attention`, `restore-pending`, `empty`, `unavailable`, `many` (twelve
 computers), and `unconfigured` (a removed computer with a pending restore).
-`--dialog` opens `help`, `details`, `remove`, `notice`, or `error`. `--compact`
+`--dialog` opens `help`, `details`, `remove`, `notice`, or `error`.
+`--setup-preview` accepts `computer`, `pair`, `preferences`, `recovery`
+(macOS with BetterDisplay), `windows`, `advanced`, and `check`. `--compact`
 renders the minimum window size. With an offscreen platform,
 `--screenshot /tmp/manager.png` exports the rendered demo. These preview and
 screenshot options require `--demo`.
@@ -58,7 +60,9 @@ screenshot options require `--demo`.
   with a visible bar, and holds the one global primary action, Add computer.
 - The main pane shows the selected computer's name, platform, and address,
   then a status card, the action row, the profile, and tertiary actions (Edit,
-  Add to app launcher, Details, Remove). Nothing else competes for the space.
+  Add to or Remove from app launcher, Details, Remove). The launcher action
+  reflects whether the desktop entry currently exists. Nothing else competes
+  for the space.
 - When the service is not answering, one banner names the cause and offers
   Start service and Check again. Rows keep their last known label with a
   hollow dot, and the card says which state was last known.
@@ -104,13 +108,30 @@ of a rendered frame.
 
 ## Guided setup
 
-Choose **Add computer** to select a computer already paired in Moonlight,
-confirm its name and address, choose desktop quality, then check and save.
+Choose **Add computer**. The first step lists computers already paired in
+Moonlight, and below them the computers found through Tailscale and on the
+local network, each with its platform, whether it is online, and whether it is
+already paired. Picking an unpaired computer, or entering an address by hand,
+opens the pairing page: a four-digit PIN, the address of Sunshine's web
+interface on that host, and a progress line while Moonlight waits. Pairing
+runs through Moonlight's own command line, so certificates stay in Moonlight;
+the dialog asks you to close the Moonlight window first. A rejected PIN offers
+a retry with a new one. A successful pairing continues to Settings with the
+name, address, and platform already filled in.
+
 Steps are shown with completed, current, and upcoming markers; editing an
-existing computer skips the first step and shows two. If Moonlight has no
-paired computers, the dialog explains pairing and offers Open Moonlight, which
-launches the installed `moonlight` executable, and Refresh list. Pairing and
-certificate storage stay in Moonlight.
+existing computer skips the first step and shows two.
+
+For a macOS or Windows computer the Settings step adds **Display recovery**.
+Leave the display alone is the default. On a Mac, Follow the main display or
+Manage a display with BetterDisplay need the approved SSH user; the latter
+reads the Mac's displays over SSH and lets you pick the display, its streaming
+mode, whether to follow the main display, and whether AC power is required.
+On Windows, Managed with the console helper needs an SSH alias for an
+administrator account; Inspect the PC lists its displays, Sunshine's capture
+output, and the helper state, preselects the virtual display, and offers to
+install the helper. The check on the last step then also proves SSH and the
+chosen display, without changing anything on the host.
 
 Continue validates the name, address, and resolution and shows the rule under
 each field that needs attention. The check runs automatically when the last

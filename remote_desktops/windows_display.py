@@ -130,6 +130,72 @@ def restore(record, host, persist):
     return False
 
 
+GUID = re.compile(r"[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{4}){3}-[A-Fa-f0-9]{12}\Z")
+
+
+def hardware_id(device_id):
+    """EDID hardware ID from a display device path such as \\\\?\\DISPLAY#MTT1337#..."""
+    m = re.match(re.escape("\\\\?\\DISPLAY#") + r"([A-Z0-9]{7})#", device_id or "")
+    return m[1] if m else None
+
+
+def inspect(alias, pairing_uuid):
+    """Read-only host inventory before the helper exists: identity, Sunshine output, displays."""
+    if not GUID.fullmatch(pairing_uuid or ""):
+        raise ValueError("invalid Sunshine UUID")
+    source = Path(__file__).with_name("windows").joinpath("Display.cs").read_text()
+    script = "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'\n"
+    script += "$source=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + base64.b64encode(source.encode()).decode() + "'))\n"
+    script += r'''try {
+ $sunshineRoot=Join-Path $env:ProgramFiles 'Sunshine\config'
+ $state=Get-Content (Join-Path $sunshineRoot 'sunshine_state.json') -Raw | ConvertFrom-Json
+ if ($state.root.uniqueid -ine '__UUID__') {throw 'host-identity-mismatch: SSH host is not the paired Sunshine computer'}
+ $conf=[IO.File]::ReadAllText((Join-Path $sunshineRoot 'sunshine.conf'))
+ $output=[regex]::Matches($conf,'(?m)^output_name\s*=\s*([^\r\n]+)')
+ $helperRoot='C:\ProgramData\Hypertile\display'
+ $helper=@{installed=(Test-Path (Join-Path $helperRoot 'config.json'));phase=$null;capture_id=$null;fresh=$false}
+ if ($helper.installed -and (Test-Path (Join-Path $helperRoot 'status.json'))) {
+  $status=Get-Content (Join-Path $helperRoot 'status.json') -Raw | ConvertFrom-Json
+  $helper.phase=$status.phase; $helper.capture_id=$status.capture_id
+  $helper.fresh=(([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()-$status.observed_at) -le 10)
+ }
+ Add-Type -TypeDefinition $source
+ $displays=@([HypertileDisplay]::Inspect() | ForEach-Object {@{id=$_.id;name=$_.name;active=$_.active;available=$_.available;internal=$_.internalPanel;primary=$_.primary;width=$_.width;height=$_.height}})
+ @{ok=$true;result=@{sunshine_output=$(if ($output.Count -eq 1) {$output[0].Groups[1].Value.Trim()} else {$null});helper=$helper;displays=$displays}} | ConvertTo-Json -Depth 8 -Compress
+} catch {@{ok=$false;error=$_.Exception.Message} | ConvertTo-Json -Compress}
+'''.replace("__UUID__", pairing_uuid)
+    response = powershell(alias, script, timeout=60)
+    if not response.get("ok"):
+        raise ValueError(response.get("error", "Windows inspection failed"))
+    result = response["result"]
+    displays = []
+    for d in result.get("displays") or []:
+        if isinstance(d, dict) and isinstance(d.get("id"), str):
+            displays.append({**d, "hardware": hardware_id(d["id"])})
+    return {"sunshine_output": result.get("sunshine_output"), "helper": result.get("helper") or {"installed": False},
+            "displays": displays}
+
+
+def install(alias, pairing_uuid, output_uuid, capture_hardware):
+    for value in (pairing_uuid, (output_uuid or "").strip("{}")):
+        if not GUID.fullmatch(value):
+            raise ValueError("invalid Sunshine UUID")
+    if not re.fullmatch(r"[A-Z0-9]{7}", capture_hardware or ""):
+        raise ValueError("invalid EDID hardware ID")
+    folder = Path(__file__).with_name("windows")
+    package = {"files": {p.name: base64.b64encode(p.read_bytes()).decode() for p in folder.iterdir()
+                         if p.name in ("Guard.ps1", "Policy.ps1", "Display.cs", "Test.ps1")},
+               "pairing_uuid": pairing_uuid, "output_uuid": "{" + output_uuid.strip("{}") + "}",
+               "capture_hardware": capture_hardware}
+    payload = base64.b64encode(json.dumps(package).encode()).decode()
+    script = "$package=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + payload + "')) | ConvertFrom-Json\n"
+    script += "try {\n" + (folder / "Install.ps1").read_text() + "\n} catch { @{ok=$false;error=$_.Exception.Message} | ConvertTo-Json -Compress }\n"
+    result = powershell(alias, script, timeout=90)
+    if not result.get("ok"):
+        raise ValueError(result.get("error", "Windows display helper installation failed"))
+    return result
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Install the narrowly scoped Windows display helper over approved SSH")
@@ -138,17 +204,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-uuid", required=True)
     parser.add_argument("--capture-hardware", required=True, help="Exact EDID hardware ID, for example MTT1337")
     args = parser.parse_args()
-    for value in (args.pairing_uuid, args.output_uuid.strip("{}")):
-        if not re.fullmatch(r"[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{4}){3}-[A-Fa-f0-9]{12}", value):
-            parser.error("invalid Sunshine UUID")
-    if not re.fullmatch(r"[A-Z0-9]{7}", args.capture_hardware):
-        parser.error("invalid EDID hardware ID")
-    folder = Path(__file__).with_name("windows")
-    package = {"files": {p.name: base64.b64encode(p.read_bytes()).decode() for p in folder.iterdir()
-                         if p.name in ("Guard.ps1", "Policy.ps1", "Display.cs", "Test.ps1")},
-               "pairing_uuid": args.pairing_uuid, "output_uuid": "{" + args.output_uuid.strip("{}") + "}",
-               "capture_hardware": args.capture_hardware}
-    payload = base64.b64encode(json.dumps(package).encode()).decode()
-    script = "$package=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + payload + "')) | ConvertFrom-Json\n"
-    script += "try {\n" + (folder / "Install.ps1").read_text() + "\n} catch { @{ok=$false;error=$_.Exception.Message} | ConvertTo-Json -Compress }\n"
-    print(json.dumps(powershell(args.ssh, script, timeout=90), indent=2))
+    try:
+        print(json.dumps(install(args.ssh, args.pairing_uuid, args.output_uuid, args.capture_hardware), indent=2))
+    except ValueError as error:
+        parser.error(str(error))

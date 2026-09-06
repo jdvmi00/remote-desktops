@@ -11,6 +11,7 @@ import sys
 from .host import Host, configuration, configuration_value, moonlight_hosts, UUID, prepare, restore, require, stream_argv
 from .mac_display import same_setting, manages_mode
 from .storage import atomic_json, read_json
+from . import setup
 
 
 def health(record, host):
@@ -49,8 +50,20 @@ def operation(request):
         return [{"pairing_uuid": key, "name": h["name"], "host": h["address"] or ""}
                 for key, h in moonlight_hosts().items() if UUID.fullmatch(key) and h["paired"] and h["name"]]
     if request["operation"] == "setup-probe":
-        Host(request["computer"], {"display": {"adapter": "external"}}).probe()
-        return {"authenticated": True}
+        # A read-only probe with the draft's own adapter also proves SSH and the display.
+        computer = request["computer"]
+        profile = computer["profiles"][computer.get("default_profile") or next(iter(computer["profiles"]))]
+        observed = Host(computer, {"display": profile.get("display", {"adapter": "external"})}).probe()
+        return {"authenticated": True, "restoration": observed.get("restoration"),
+                "display": {k: observed[k] for k in ("identity", "current", "ac_power", "display") if k in observed}}
+    if request["operation"] == "discover":
+        return setup.discover()
+    if request["operation"] == "pair":
+        return setup.pair(request.get("host"), request.get("pin"))
+    if request["operation"] == "inspect":
+        return setup.inspect(request["computer"])
+    if request["operation"] == "install-helper":
+        return setup.install_helper(request["computer"], request.get("device_id"))
     path = Path(request["path"])
     with path.with_suffix(".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)

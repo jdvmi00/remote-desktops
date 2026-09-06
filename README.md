@@ -86,10 +86,12 @@ Moonlight, or Sunshine application.
 
 ## Graphical manager
 
-A separate Qt 6/QML manager is available on `develop`. It adds, edits, and
-removes computers paired in Moonlight, and provides connection controls,
-profile selection, display recovery, and per-computer launchers, following the
-active Omarchy theme and desktop font. Closing it leaves connections running.
+A separate Qt 6/QML manager is available on `develop`. It finds computers on
+Tailscale and the local network, pairs them through Moonlight with a PIN,
+configures managed macOS and Windows display recovery over SSH, and provides
+connection controls, profile selection, and per-computer launchers, following
+the active Omarchy theme and desktop font. Closing it leaves connections
+running.
 
 See [UI build, preview, and interaction guide](docs/UI.md). Pairing and computer
 configuration still use Moonlight and the backend setup guide; no installable

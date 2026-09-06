@@ -5,6 +5,7 @@
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QPointer>
+#include <QFileInfo>
 #include <QStandardPaths>
 #include <utility>
 
@@ -52,6 +53,9 @@ QVariantList Manager::computers() const {
         }
         item["busy"] = m_busy.contains(item["computer"].toString());
         item["stale"] = !m_available;
+        // The launcher entry is a file the backend writes; its presence is the whole state.
+        const auto desktopEntry = QStandardPaths::writableLocation(QStandardPaths::ApplicationsLocation) + "/remote-desktops-" + item["computer"].toString() + ".desktop";
+        item["launcher_installed"] = m_demo ? m_demoLaunchers.contains(item["computer"].toString()) : QFileInfo::exists(desktopEntry);
         out.append(item.toVariantMap());
     }
     return out;
@@ -75,16 +79,16 @@ void Manager::refresh() {
     if (m_demo) { publish(); return; }
     loadCatalog(); poll();
 }
-void Manager::process(QStringList arguments, std::function<void(bool, QByteArray)> complete, QByteArray input) {
+void Manager::process(QStringList arguments, std::function<void(bool, QByteArray)> complete, QByteArray input, int deadline) {
     auto *job = new QProcess(this);
-    auto *deadline = new QTimer(job);
-    deadline->setSingleShot(true);
+    auto *timer = new QTimer(job);
+    timer->setSingleShot(true);
     auto output = std::make_shared<QByteArray>();
     auto failure = std::make_shared<QByteArray>();
     auto done = std::make_shared<bool>(false);
-    auto finish = [job, deadline, complete, done](bool ok, QByteArray data) {
+    auto finish = [job, timer, complete, done](bool ok, QByteArray data) {
         if (std::exchange(*done, true)) return;
-        deadline->stop(); complete(ok, data); job->deleteLater();
+        timer->stop(); complete(ok, data); job->deleteLater();
     };
     connect(job, &QProcess::readyReadStandardOutput, this, [job, output, finish] {
         *output += job->readAllStandardOutput();
@@ -102,12 +106,12 @@ void Manager::process(QStringList arguments, std::function<void(bool, QByteArray
         if (message.startsWith("remote-desktops: ")) message = message.mid(17);
         finish(ok, ok ? *output : (message.isEmpty() ? QByteArray("The request failed. Refresh to check the current state.") : message));
     });
-    connect(deadline, &QTimer::timeout, this, [job, finish] {
+    connect(timer, &QTimer::timeout, this, [job, finish] {
         job->kill(); finish(false, "The request timed out. Its outcome may still be pending; refresh before retrying.");
     });
     connect(job, &QProcess::started, this, [job, input] { job->write(input); job->closeWriteChannel(); });
     job->start(m_backend, arguments);
-    deadline->start(60000);
+    timer->start(deadline);
 }
 void Manager::loadCatalog() {
     if (m_catalogLoading) return;
@@ -159,7 +163,7 @@ void Manager::poll() {
     socket->connectToServer(m_socketPath);
 }
 void Manager::act(QString computer, QString action, QString profile) {
-    static const QSet<QString> allowed{"connect", "disconnect", "reconnect", "restore", "focus", "launcher"};
+    static const QSet<QString> allowed{"connect", "disconnect", "reconnect", "restore", "focus", "launcher", "launcher-remove"};
     if (!allowed.contains(action) || m_busy.contains(computer)) return;
     bool known = false;
     for (const auto &entry : computers()) if (entry.toMap()["computer"].toString() == computer) known = true;
@@ -175,8 +179,10 @@ void Manager::act(QString computer, QString action, QString profile) {
         m_busy.insert(computer); m_notice.clear(); m_noticeError = false; publish();
         QTimer::singleShot(350, this, [this, computer, action, profile, set] {
             m_busy.remove(computer);
-            if (action == "focus" || action == "launcher") {
-                m_notice = action == "launcher" ? "Preview only — a launcher entry would be installed." : "Preview only — the desktop window would be focused.";
+            if (action == "focus" || action == "launcher" || action == "launcher-remove") {
+                if (action == "launcher") m_demoLaunchers.insert(computer);
+                if (action == "launcher-remove") m_demoLaunchers.remove(computer);
+                m_notice = action == "launcher" ? label(computer) + " was added to the preview launcher." : action == "launcher-remove" ? label(computer) + " was removed from the preview launcher." : "Preview only — the desktop window would be focused.";
                 publish(); return;
             }
             const bool connecting = action == "connect" || action == "reconnect";
@@ -201,6 +207,7 @@ void Manager::act(QString computer, QString action, QString profile) {
     }
     QStringList args{"--json"};
     if (action == "launcher") args << "launcher" << "install" << computer;
+    else if (action == "launcher-remove") args << "launcher" << "remove" << computer;
     else args << action << computer;
     if (action == "connect" && !profile.isEmpty()) args << "--profile" << profile;
     m_busy.insert(computer); m_notice.clear(); m_noticeError = false; publish();
@@ -210,6 +217,7 @@ void Manager::act(QString computer, QString action, QString profile) {
         // only results with no other visible effect are announced.
         if (!ok) { m_notice = QString::fromUtf8(data).trimmed(); m_noticeError = true; }
         else if (action == "launcher") m_notice = label(computer) + " was added to your app launcher.";
+        else if (action == "launcher-remove") m_notice = label(computer) + " was removed from your app launcher.";
         poll(); publish();
     });
 }
@@ -284,7 +292,8 @@ void Manager::demoState(QString phase) {
 }
 
 void Manager::setup(QString action, QVariantMap draft) {
-    if (m_setupBusy || !QSet<QString>{"catalog", "get", "test", "save"}.contains(action)) return;
+    static const QSet<QString> actions{"catalog", "get", "test", "save", "discover", "pair", "inspect", "install-helper"};
+    if (m_setupBusy || !actions.contains(action)) return;
     m_setupBusy = true; publish();
     auto complete = [this, action, draft](bool ok, QByteArray data) {
         m_setupBusy = false;
@@ -310,10 +319,39 @@ void Manager::setup(QString action, QVariantMap draft) {
         publish();
     };
     if (m_demo) {
-        QTimer::singleShot(action == "test" ? 1100 : 300, this, [this, action, draft, complete] {
+        const int delay = action == "test" || action == "inspect" ? 1100 : action == "pair" ? 2600 : action == "install-helper" ? 1600 : 300;
+        QTimer::singleShot(delay, this, [this, action, draft, complete] {
             QJsonObject result;
+            const QJsonObject home{{"pairing_uuid", "11111111-2222-3333-4444-555555555555"}, {"name", "Home workstation"}, {"host", "home.example.net"}, {"configured", m_demoDrafts.contains("home-workstation-11111111")}};
+            const QJsonObject garage{{"pairing_uuid", "22222222-3333-4444-5555-666666666666"}, {"name", "Garage PC"}, {"host", "garage.tail-example.ts.net"}, {"configured", m_demoDrafts.contains("garage-pc-22222222")}};
             if (action == "catalog") {
-                result = QJsonObject{{"revision", "preview"}, {"paired", QJsonArray{QJsonObject{{"pairing_uuid", "11111111-2222-3333-4444-555555555555"}, {"name", "Home workstation"}, {"host", "home.example.net"}, {"configured", m_demoDrafts.contains("home-workstation-11111111")}}}}};
+                QJsonArray paired{home};
+                if (m_demoPaired.contains("garage")) paired.append(garage);
+                result = QJsonObject{{"revision", "preview"}, {"paired", paired}};
+            } else if (action == "discover") {
+                result = QJsonObject{{"revision", "preview"}, {"candidates", QJsonArray{
+                    QJsonObject{{"name", "Garage PC"}, {"host", "garage.tail-example.ts.net"}, {"platform", "windows"}, {"source", "tailscale"}, {"online", true}, {"pairing_uuid", m_demoPaired.contains("garage") ? QJsonValue("22222222-3333-4444-5555-666666666666") : QJsonValue()}, {"configured", m_demoDrafts.contains("garage-pc-22222222")}, {"addresses", QJsonArray{"garage.tail-example.ts.net", "100.64.0.9"}}},
+                    QJsonObject{{"name", "Home workstation"}, {"host", "home.example.net"}, {"platform", "linux"}, {"source", "lan"}, {"online", true}, {"pairing_uuid", "11111111-2222-3333-4444-555555555555"}, {"configured", m_demoDrafts.contains("home-workstation-11111111")}, {"addresses", QJsonArray{"home.example.net", "192.168.1.20"}}},
+                    QJsonObject{{"name", "Mac mini"}, {"host", "mini.tail-example.ts.net"}, {"platform", "macos"}, {"source", "tailscale"}, {"online", false}, {"pairing_uuid", QJsonValue()}, {"configured", false}, {"addresses", QJsonArray{"mini.tail-example.ts.net"}}}}}};
+            } else if (action == "pair") {
+                if (draft["pin"].toString() == "0000") { complete(false, "pairing-failed: Failed to pair: incorrect PIN"); return; }
+                m_demoPaired.insert("garage");
+                result = QJsonObject{{"revision", "preview"}, {"paired", QJsonObject{{"paired", true}, {"pairing_uuid", "22222222-3333-4444-5555-666666666666"}, {"name", "Garage PC"}, {"host", draft["host"].toString()}}}};
+            } else if (action == "inspect") {
+                if (draft["platform"].toString() == "windows") {
+                    result = QJsonObject{{"platform", "windows"}, {"sunshine_output", "{ABCDEF01-1111-2222-3333-444444444444}"},
+                        {"helper", QJsonObject{{"installed", m_demoHelpers.contains(draft["computer"].toString())}, {"phase", "idle"}}},
+                        {"displays", QJsonArray{QJsonObject{{"id", "\\\\?\\DISPLAY#MTT1337#5&2c4d1f3&0&UID4352#{e6f07b5f}"}, {"name", "Virtual display"}, {"active", false}, {"available", true}, {"internal", false}, {"hardware", "MTT1337"}, {"width", 2560}, {"height", 1440}},
+                                               QJsonObject{{"id", "\\\\?\\DISPLAY#BOE0A1B#4&1&0&UID256#{e6f07b5f}"}, {"name", "Built-in panel"}, {"active", true}, {"available", true}, {"internal", true}, {"hardware", "BOE0A1B"}, {"width", 1920}, {"height", 1200}}}}};
+                } else {
+                    const QJsonArray modes{QJsonObject{{"resolution", "2560x1440"}, {"hidpi", true}, {"refresh", 60}}, QJsonObject{{"resolution", "3840x2160"}, {"hidpi", false}, {"refresh", 60}}, QJsonObject{{"resolution", "1920x1080"}, {"hidpi", true}, {"refresh", 60}}};
+                    result = QJsonObject{{"platform", "macos"}, {"betterdisplay", true}, {"ac_power", true}, {"lid_closed", false},
+                        {"displays", QJsonArray{QJsonObject{{"uuid", "AAAAAAAA-1111-2222-3333-444444444444"}, {"name", "Studio Display"}, {"main", true}, {"builtin", false}, {"current", modes[0]}, {"modes", modes}},
+                                               QJsonObject{{"uuid", "BBBBBBBB-1111-2222-3333-444444444444"}, {"name", "Built-in Retina Display"}, {"main", false}, {"builtin", true}, {"current", QJsonObject{{"resolution", "1728x1117"}, {"hidpi", true}, {"refresh", 120}}}, {"modes", QJsonArray{QJsonObject{{"resolution", "1728x1117"}, {"hidpi", true}, {"refresh", 120}}}}}}}};
+                }
+            } else if (action == "install-helper") {
+                m_demoHelpers.insert(draft["computer"].toString());
+                result = QJsonObject{{"ok", true}};
             } else if (action == "get") {
                 auto id = draft["computer"].toString();
                 if (m_demoDrafts.contains(id)) result = QJsonObject::fromVariantMap(m_demoDrafts[id]);
@@ -323,8 +361,11 @@ void Manager::setup(QString action, QVariantMap draft) {
                     result["codec"] = "auto"; result["input"] = "absolute"; result["audio"] = "focus";
                     result["profiles"] = QJsonObject{{"desktop", QJsonObject{{"stream_resolution", "1920x1080"}, {"fps", 60}, {"bitrate", 30000}}}};
                 }
-            } else if (action == "test") result["tested"] = true;
-            else {
+            } else if (action == "test") {
+                result["tested"] = true;
+                const auto adapter = draft["display"].toMap()["adapter"].toString();
+                result["restoration"] = adapter.isEmpty() || adapter == "external" ? "externally-managed" : "managed";
+            } else {
                 auto saved = draft; saved.remove("pairing_uuid");
                 saved["profiles"] = QVariantMap{{draft["profile"].toString(), draft}};
                 m_demoDrafts[draft["computer"].toString()] = saved;
@@ -342,5 +383,7 @@ void Manager::setup(QString action, QVariantMap draft) {
     }
     QStringList arguments{"--json", "settings", action};
     if (action == "get") arguments << draft["computer"].toString();
-    process(arguments, complete, QJsonDocument(QJsonObject::fromVariantMap(draft)).toJson(QJsonDocument::Compact));
+    // Pairing waits for a PIN typed on the host; installation and probes run over SSH.
+    const int deadline = action == "pair" || action == "install-helper" ? 150000 : action == "inspect" || action == "test" ? 100000 : 60000;
+    process(arguments, complete, QJsonDocument(QJsonObject::fromVariantMap(draft)).toJson(QJsonDocument::Compact), deadline);
 }
