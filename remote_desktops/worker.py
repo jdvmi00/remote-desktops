@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 import sys
-from .host import Host, configuration, prepare, restore, require, stream_argv
+from .host import Host, configuration, configuration_value, moonlight_hosts, UUID, prepare, restore, require, stream_argv
 from .mac_display import same_setting, manages_mode
 from .storage import atomic_json, read_json
 
@@ -43,6 +43,14 @@ def health(record, host):
 def operation(request):
     if request["operation"] == "validate":
         return configuration(Path(request["config"]))
+    if request["operation"] == "validate-value":
+        return configuration_value(request["value"])
+    if request["operation"] == "paired":
+        return [{"pairing_uuid": key, "name": h["name"], "host": h["address"] or ""}
+                for key, h in moonlight_hosts().items() if UUID.fullmatch(key) and h["paired"] and h["name"]]
+    if request["operation"] == "setup-probe":
+        Host(request["computer"], {"display": {"adapter": "external"}}).probe()
+        return {"authenticated": True}
     path = Path(request["path"])
     with path.with_suffix(".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)

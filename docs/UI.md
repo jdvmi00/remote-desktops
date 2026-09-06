@@ -1,6 +1,6 @@
 # Desktop manager
 
-The Qt 6/QML manager is a separate application for configured computers. It
+The Qt 6/QML manager is a separate application for setting up and connecting computers. It
 shows connection state, selects an existing profile, connects, focuses,
 disconnects, reconnects, restores a pending host display, and installs a
 per-computer application launcher. It has no video renderer and owns no host
@@ -66,15 +66,33 @@ These preview and screenshot options require `--demo`.
 
 ## Current scope
 
-This first manager manages existing configuration. Pairing still happens in
-Moonlight; adding/editing computer and profile configuration follows the
-[backend setup guide](BACKEND.md). The in-app help explains that flow. A guided
-pairing/configuration editor is subsequent work; this UI does not offer a
-placeholder form or write unvalidated settings.
+Choose **Add computer** to select a computer already paired in Moonlight,
+confirm its name and address, choose desktop quality, then test and save. The
+check authenticates through Moonlight and verifies the Desktop app is listed.
+It does not start video, capture input, or change a host display. Pairing and
+certificate storage stay in Moonlight. If no paired computers appear, complete
+pairing there and refresh the setup list.
+
+New profiles use the host’s existing display and automatic decoder selection.
+Advanced controls expose resolution, frame rate, bitrate, codec, mouse mode,
+and audio policy. **Edit** changes an existing computer and its default profile;
+other profiles, SSH configuration, host display adapters, and window identity
+are preserved. Changes apply after disconnecting and starting a new connection;
+Reconnect continues using the active session’s snapshot.
+
+The save button requires a successful check of the current draft. Editing any
+field invalidates that check. Validation or reachability failures leave the
+saved configuration untouched. A revision conflict asks you to reopen setup,
+so another editor’s changes are not silently overwritten. Cancel discards the
+draft. Saving and optional launcher installation are separate operations: a
+launcher failure leaves the computer saved and can be retried from the main
+screen. Existing launcher entries can be updated from the final setup step.
+
+Use `--demo --setup-preview computer` (or `preferences`, `advanced`, `check`)
+to preview each setup page with synthetic data. Demo settings stay in memory.
 
 The manager does not install itself, register a system service, migrate legacy
-configuration, or change Hypertile. Packaging and a graphical setup wizard are
-separate delivery steps.
+configuration, or change Hypertile. Packaging remains a separate delivery step.
 
 ## Omarchy themes
 

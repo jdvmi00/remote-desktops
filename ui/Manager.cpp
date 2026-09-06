@@ -57,7 +57,7 @@ void Manager::refresh() {
     if (m_demo) { publish(); return; }
     loadCatalog(); poll();
 }
-void Manager::process(QStringList arguments, std::function<void(bool, QByteArray)> complete) {
+void Manager::process(QStringList arguments, std::function<void(bool, QByteArray)> complete, QByteArray input) {
     auto *job = new QProcess(this);
     auto *deadline = new QTimer(job);
     deadline->setSingleShot(true);
@@ -84,6 +84,7 @@ void Manager::process(QStringList arguments, std::function<void(bool, QByteArray
     connect(deadline, &QTimer::timeout, this, [job, finish] {
         job->kill(); finish(false, "The request timed out. Its outcome may still be pending; refresh before retrying.");
     });
+    connect(job, &QProcess::started, this, [job, input] { job->write(input); job->closeWriteChannel(); });
     job->start(m_backend, arguments);
     deadline->start(60000);
 }
@@ -184,4 +185,66 @@ void Manager::demoState(QString phase) {
     s["recovery_pending"] = phase == "restore-pending";
     s["error"] = phase == "restore-pending" ? "The host is unreachable. Its original display settings are saved; restore when it is reachable again." : "";
     m_sessions[0] = s; publish();
+}
+
+void Manager::setup(QString action, QVariantMap draft) {
+    if (m_setupBusy || !QSet<QString>{"catalog", "get", "test", "save"}.contains(action)) return;
+    m_setupBusy = true; publish();
+    auto complete = [this, action, draft](bool ok, QByteArray data) {
+        m_setupBusy = false;
+        QJsonParseError error;
+        auto document = QJsonDocument::fromJson(data, &error);
+        const bool valid = ok && error.error == QJsonParseError::NoError && document.isObject();
+        if (valid && action == "save" && !m_demo) {
+            auto entry = QJsonObject::fromVariantMap(draft);
+            entry["default_profile"] = entry["profile"];
+            entry["profiles"] = QJsonArray{entry["profile"]};
+            bool found = false;
+            for (qsizetype i = 0; i < m_catalog.size(); ++i) if (m_catalog[i].toObject()["computer"] == entry["computer"]) {
+                auto old = m_catalog[i].toObject();
+                for (const auto &key : {"name", "host", "platform", "default_profile"}) old[key] = entry[key];
+                m_catalog[i] = old; found = true;
+            }
+            if (!found) m_catalog.append(entry);
+            m_notice = "Computer saved. Changes apply to the next new connection.";
+        }
+        emit setupFinished(action, valid, valid ? document.object().toVariantMap() : QVariantMap{},
+                           valid ? QString{} : ok ? "The backend returned invalid settings." : QString::fromUtf8(data).trimmed());
+        if (valid && action == "save") refresh();
+        publish();
+    };
+    if (m_demo) {
+        QTimer::singleShot(200, this, [this, action, draft, complete] {
+            QJsonObject result;
+            if (action == "catalog") {
+                result = QJsonObject{{"revision", "preview"}, {"paired", QJsonArray{QJsonObject{{"pairing_uuid", "11111111-2222-3333-4444-555555555555"}, {"name", "Home workstation"}, {"host", "home.example.net"}, {"configured", m_demoDrafts.contains("home-workstation-11111111")}}}}};
+            } else if (action == "get") {
+                auto id = draft["computer"].toString();
+                if (m_demoDrafts.contains(id)) result = QJsonObject::fromVariantMap(m_demoDrafts[id]);
+                else for (const auto &entry : m_catalog) if (entry.toObject()["computer"].toString() == id) {
+                    result = entry.toObject(); result["profile"] = "desktop"; result["revision"] = "preview";
+                    result["stream_resolution"] = "1920x1080"; result["fps"] = 60; result["bitrate"] = 30000;
+                    result["codec"] = "auto"; result["input"] = "absolute"; result["audio"] = "focus";
+                    result["profiles"] = QJsonObject{{"desktop", QJsonObject{{"stream_resolution", "1920x1080"}, {"fps", 60}, {"bitrate", 30000}}}};
+                }
+            } else if (action == "test") result["tested"] = true;
+            else {
+                auto saved = draft; saved.remove("pairing_uuid");
+                saved["profiles"] = QVariantMap{{draft["profile"].toString(), draft}};
+                m_demoDrafts[draft["computer"].toString()] = saved;
+                auto entry = QJsonObject::fromVariantMap(draft);
+                entry["default_profile"] = entry["profile"]; entry["profiles"] = QJsonArray{entry["profile"]};
+                bool found = false;
+                for (qsizetype i=0; i<m_catalog.size(); ++i) if (m_catalog[i].toObject()["computer"] == entry["computer"]) { m_catalog[i] = entry; found = true; }
+                if (!found) { m_catalog.append(entry); m_sessions.append(QJsonObject{{"computer", entry["computer"]}, {"phase", "idle"}, {"desired", false}}); }
+                result["saved"] = true; result["computer"] = entry["computer"];
+                m_notice = "Preview settings saved. No real computer was changed.";
+            }
+            complete(true, QJsonDocument(result).toJson(QJsonDocument::Compact));
+        });
+        return;
+    }
+    QStringList arguments{"--json", "settings", action};
+    if (action == "get") arguments << draft["computer"].toString();
+    process(arguments, complete, QJsonDocument(QJsonObject::fromVariantMap(draft)).toJson(QJsonDocument::Compact));
 }

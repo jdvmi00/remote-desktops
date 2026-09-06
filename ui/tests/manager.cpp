@@ -51,6 +51,49 @@ private slots:
         window->close();
         QCOMPARE(m.computers()[1].toMap()["phase"].toString(), QString("window-ready"));
     }
+    void guidedSetupTestGateEditAndCancel() {
+        Manager m("/must-not-run", "/must-not-connect", true);
+        Theme theme("/missing/palette");
+        QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.rootContext()->setContextProperty("manager", &m);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        auto *dialog = window->findChild<QObject *>("setupDialog");
+        QVERIFY(dialog);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "begin", Q_ARG(QVariant, QVariant(""))));
+        QTRY_VERIFY(dialog->property("loaded").toBool());
+        QVariantMap host{{"name", "Home workstation"}, {"host", "home.example.net"}, {"pairing_uuid", "11111111-2222-3333-4444-555555555555"}};
+        QVERIFY(QMetaObject::invokeMethod(dialog, "choose", Q_ARG(QVariant, QVariant(host))));
+        auto *next = dialog->findChild<QObject *>("setupNext");
+        auto *test = dialog->findChild<QObject *>("setupTest");
+        QVERIFY(next && test);
+        QVERIFY(next->property("enabled").toBool());
+        QVERIFY(QMetaObject::invokeMethod(next, "clicked"));
+        QCOMPARE(dialog->property("step").toInt(), 2);
+        QVERIFY(!next->property("enabled").toBool());
+        QVERIFY(QMetaObject::invokeMethod(test, "clicked"));
+        QTRY_VERIFY(next->property("enabled").toBool());
+        QVERIFY(QMetaObject::invokeMethod(dialog, "set", Q_ARG(QVariant, QVariant("name")), Q_ARG(QVariant, QVariant("My home computer"))));
+        QVERIFY(!next->property("enabled").toBool());
+        QVERIFY(QMetaObject::invokeMethod(test, "clicked"));
+        QTRY_VERIFY(next->property("enabled").toBool());
+        QVERIFY(QMetaObject::invokeMethod(next, "clicked"));
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QCOMPARE(m.computers().size(), 4);
+        QCOMPARE(m.computers().last().toMap()["name"].toString(), QString("My home computer"));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "begin", Q_ARG(QVariant, QVariant("home-workstation-11111111"))));
+        QTRY_VERIFY(dialog->property("loaded").toBool());
+        QCOMPARE(dialog->property("step").toInt(), 1);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "set", Q_ARG(QVariant, QVariant("name")), Q_ARG(QVariant, QVariant("Discard me"))));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QCOMPARE(m.computers().last().toMap()["name"].toString(), QString("My home computer"));
+        QCOMPARE(m.computers().first().toMap()["phase"].toString(), QString("window-ready"));
+        QCOMPARE(warnings.count(), 0);
+    }
     void themeSurvivesAtomicFilesAndDirectoryReplacement() {
         QTemporaryDir temp;
         QString directory = temp.path() + "/current/theme";
@@ -157,6 +200,40 @@ fi
         QFile args(binary + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
         QCOMPARE(args.readAll(), QByteArray("--json\nconnect\ntest\n--profile\ndesktop\n"));
         QVERIFY(m.notice().contains("Request accepted"));
+    }
+    void setupUsesBoundedStdinAndReportsFailures() {
+        QTemporaryDir temp;
+        QString binary = temp.path() + "/fake backend";
+        QFile script(binary); QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write(R"(#!/bin/sh
+if [ "$2" = computers ]; then
+  printf '%s\n' '[]'
+else
+  printf '%s\n' "$@" > "${0}.args"
+  cat > "${0}.input"
+  sleep 0.1
+  printf '%s\n' 'synthetic connection failure' >&2
+  exit 1
+fi
+)");
+        script.close(); script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        Manager m(binary, temp.path() + "/missing.socket");
+        QTRY_VERIFY(!m.loading());
+        QSignalSpy replies(&m, &Manager::setupFinished);
+        QVariantMap draft{{"name", "Literal $(text) with spaces"}, {"computer", "example"}};
+        m.setup("test", draft);
+        QVERIFY(m.setupBusy());
+        m.setup("save", draft); // One outstanding settings request.
+        QTRY_COMPARE(replies.count(), 1);
+        QVERIFY(!m.setupBusy());
+        QCOMPARE(replies.first()[0].toString(), QString("test"));
+        QVERIFY(!replies.first()[1].toBool());
+        QVERIFY(replies.first()[3].toString().contains("synthetic connection failure"));
+        QFile args(binary + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
+        QCOMPARE(args.readAll(), QByteArray("--json\nsettings\ntest\n"));
+        QFile input(binary + ".input"); QVERIFY(input.open(QIODevice::ReadOnly));
+        QCOMPARE(QJsonDocument::fromJson(input.readAll()).object().toVariantMap(), draft);
+        QVERIFY(m.computers().isEmpty());
     }
     void missingBackendIsActionable() {
         Manager m("/missing/backend", "/missing/socket");

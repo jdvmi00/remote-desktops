@@ -23,11 +23,12 @@ int main(int argc, char **argv) {
     parser.addOption({"backend", "Absolute path to the Rust CLI.", "path"});
     parser.addOption({"smoke-test", "Render the demo and exit with failure on QML warnings."});
     parser.addOption({"screenshot", "Save an isolated demo rendering and exit.", "path"});
+    parser.addOption({"setup-preview", "Show guided setup (computer, preferences, advanced, check).", "page"});
     parser.addOption({"compact", "Render the preview at the minimum supported size."});
     parser.addOption({"state", "Initial demo state (restore-pending, preflight, idle, empty, unavailable).", "phase"});
     parser.process(app);
     const bool demo = parser.isSet("demo");
-    if ((parser.isSet("smoke-test") || parser.isSet("screenshot") || parser.isSet("state") || parser.isSet("compact")) && !demo) return 2;
+    if ((parser.isSet("smoke-test") || parser.isSet("screenshot") || parser.isSet("state") || parser.isSet("compact") || parser.isSet("setup-preview")) && !demo) return 2;
     QString backend = parser.value("backend");
     if (backend.isEmpty()) {
         backend = QCoreApplication::applicationDirPath() + "/remote-desktops";
@@ -50,6 +51,17 @@ int main(int argc, char **argv) {
     engine.rootContext()->setContextProperty("theme", &theme);
     engine.load(QUrl("qrc:/qml/Main.qml"));
     if (engine.rootObjects().isEmpty()) return 1;
+    if (parser.isSet("setup-preview")) {
+        auto *setup = engine.rootObjects().first()->findChild<QObject *>("setupDialog");
+        QMetaObject::invokeMethod(setup, "begin", Q_ARG(QVariant, QVariant("")));
+        const auto page = parser.value("setup-preview");
+        if (page != "computer") QTimer::singleShot(350, setup, [setup, page] {
+            QVariantMap host{{"name", "Home workstation"}, {"host", "home.example.net"}, {"pairing_uuid", "11111111-2222-3333-4444-555555555555"}};
+            QMetaObject::invokeMethod(setup, "choose", Q_ARG(QVariant, QVariant(host)));
+            if (page == "advanced") setup->setProperty("advanced", true);
+            if (page == "check") { setup->setProperty("step", 2); setup->setProperty("tested", true); }
+        });
+    }
     if (parser.isSet("compact")) { engine.rootObjects().first()->setProperty("width", 820); engine.rootObjects().first()->setProperty("height", 650); }
     if (parser.isSet("smoke-test") || parser.isSet("screenshot")) {
         QTimer::singleShot(900, &app, [&] {

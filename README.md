@@ -11,7 +11,7 @@ Hypertile Scene like any other application.
 The standalone backend is implemented on `develop`: a Rust daemon and CLI with
 Moonlight process supervision, journaled host recovery, and per-computer desktop
 launcher entries. The Qt graphical manager now provides connection controls for
-configured computers. Installable packaging is not implemented yet.
+adding, editing, and connecting computers paired in Moonlight. Installable packaging is not implemented yet.
 `main` remains the locked project bootstrap; there is no published app release.
 
 The host adapters come from the remote-stream work in

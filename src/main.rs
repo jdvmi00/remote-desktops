@@ -2,6 +2,7 @@ mod desktop;
 mod host;
 mod launcher;
 mod server;
+mod settings;
 mod storage;
 mod supervisor;
 use anyhow::{Result, bail};
@@ -61,6 +62,11 @@ enum Action {
         computer: Option<String>,
     },
     Computers,
+    /// Guided computer setup and editing.
+    Settings {
+        #[command(subcommand)]
+        action: settings::Action,
+    },
     #[command(hide = true)]
     Supervise {
         #[arg(long)]
@@ -122,6 +128,13 @@ async fn run(cli: Cli) -> Result<()> {
         );
         return Ok(());
     }
+    if let Action::Settings { action } = &cli.command {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&settings::run(&paths, action).await?)?
+        );
+        return Ok(());
+    }
     if matches!(cli.command, Action::Computers) {
         let value = host::call(json!({"operation":"validate","config":paths.config})).await?;
         let entries = value
@@ -130,7 +143,7 @@ async fn run(cli: Cli) -> Result<()> {
             .iter()
             .map(|(name, c)| {
                 let title = c["title"].as_str().unwrap_or(name);
-                json!({"computer":name, "name":title.strip_suffix(" - Moonlight").unwrap_or(title),
+                json!({"computer":name, "name":c["name"].as_str().unwrap_or_else(|| title.strip_suffix(" - Moonlight").unwrap_or(title)),
                 "host":c["host"], "platform":c["platform"], "default_profile":c["default_profile"],
                 "profiles":c["profiles"].as_object().unwrap().keys().collect::<Vec<_>>()})
             })
