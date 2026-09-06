@@ -29,7 +29,10 @@ int main(int argc, char **argv) {
     QString backend = parser.value("backend");
     if (backend.isEmpty()) {
         backend = QCoreApplication::applicationDirPath() + "/remote-desktops";
-        if (!QFileInfo::exists(backend)) backend = QStandardPaths::findExecutable("remote-desktops");
+        if (!QFileInfo::exists(backend)) {
+            const auto installed = QStandardPaths::findExecutable("remote-desktops");
+            if (!installed.isEmpty()) backend = installed;
+        }
     }
     if (!demo && (backend.isEmpty() || !QFileInfo(backend).isAbsolute())) {
         qCritical("Pass --backend with the absolute path to the Rust remote-desktops executable.");
