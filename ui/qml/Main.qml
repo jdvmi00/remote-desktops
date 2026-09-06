@@ -364,13 +364,16 @@ ApplicationWindow {
                                     GridLayout {
                                         visible: root.facts.length > 0
                                         Layout.fillWidth: true; Layout.topMargin: 6; columns: root.width < 1000 ? 2 : 3; columnSpacing: 24; rowSpacing: 12
+                                        // The model is the count, so delegates survive value updates
+                                        // instead of being rebuilt on every status tick.
                                         Repeater {
-                                            model: root.facts
+                                            model: root.facts.length
                                             delegate: ColumnLayout {
-                                                required property var modelData
+                                                required property int index
+                                                readonly property var fact: root.facts[index] || ({label: "", value: ""})
                                                 Layout.fillWidth: true; spacing: 2
-                                                Caption { text: modelData.label.toUpperCase() }
-                                                Label { Layout.fillWidth: true; text: modelData.value; color: theme.colors.text; font.weight: Font.Medium; elide: Text.ElideRight }
+                                                Caption { text: fact.label.toUpperCase() }
+                                                Label { Layout.fillWidth: true; text: fact.value; color: theme.colors.text; font.weight: Font.Medium; elide: Text.ElideRight }
                                             }
                                         }
                                     }
@@ -491,17 +494,14 @@ ApplicationWindow {
         GridLayout {
             Layout.fillWidth: true; columns: 2; columnSpacing: 18; rowSpacing: 6
             Repeater {
-                model: details.rows
-                delegate: Repeater {
-                    required property var modelData
-                    model: 2
-                    delegate: Label {
-                        required property int index
-                        Layout.fillWidth: index === 1
-                        text: modelData[index]; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText
-                        color: index === 0 ? theme.colors.muted : theme.colors.text
-                        font.pointSize: index === 0 ? theme.type.caption : theme.type.body
-                    }
+                model: details.rows.length * 2
+                delegate: Label {
+                    required property int index
+                    readonly property var row: details.rows[Math.floor(index / 2)] || ["", ""]
+                    Layout.fillWidth: index % 2 === 1
+                    text: row[index % 2]; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText
+                    color: index % 2 === 0 ? theme.colors.muted : theme.colors.text
+                    font.pointSize: index % 2 === 0 ? theme.type.caption : theme.type.body
                 }
             }
         }
