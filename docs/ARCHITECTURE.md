@@ -28,6 +28,10 @@ Moonlight retains hardware decoding and its own rendering/frame pacing.
 - Session intent and recovery use separate files. Rust writes `session.json`;
   the Python helper alone writes `recovery.json` under an operation lock. Both
   use private atomic file replacement and fsync.
+- A `forget` command drops a session record only when it is settled: not
+  desired, no live client, phase idle or attention, and no pending recovery
+  journal. Removing the record also drops its wake channel, which ends the
+  session worker before it can touch a record a later connect creates.
 - Disconnect intent is durable immediately. An already-started host operation
   may finish, but its journal is retained and restored before any client launch.
   Cancelling a task must never erase an uncertain host write.
@@ -108,6 +112,15 @@ implementation. Configuration listing runs the Rust CLI once at startup and on
 explicit refresh, exposing only computer ID/name, host, platform, default
 profile, and profile names. Pairing material is not part of this listing.
 Commands use an absolute executable and an argv array, never a shell string.
+Remove runs `settings remove`; Start service runs `start`. The only other
+process the manager starts is the installed Moonlight executable, on an explicit
+Open Moonlight request during setup, detached and without arguments. Window
+size and the selected computer persist through QSettings; the preview never
+writes them.
+
+The status reply also carries the session's launch time, Moonlight version,
+retry attempt count, and next retry time so the manager can show elapsed
+session time and retry countdowns without inventing figures.
 
 Status uses asynchronous QLocalSocket request/reply framing, a 1.5-second
 request timeout, a 2 MB reply limit, and at most one outstanding request. The

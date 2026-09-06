@@ -1,23 +1,33 @@
 #include "Manager.h"
 #include <QClipboard>
+#include <QDateTime>
 #include <QGuiApplication>
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QPointer>
-#include <QRegularExpression>
+#include <QStandardPaths>
 #include <utility>
 
+namespace {
+qint64 now() { return QDateTime::currentSecsSinceEpoch(); }
+}
 Manager::Manager(QString backend, QString socket, bool demo, QObject *parent)
     : QObject(parent), m_backend(std::move(backend)), m_socketPath(std::move(socket)), m_demo(demo) {
     m_poll.setInterval(2000);
     connect(&m_poll, &QTimer::timeout, this, &Manager::poll);
+    // Pairing happens in Moonlight; the manager only offers to open it.
+    m_moonlight = QStandardPaths::findExecutable("moonlight");
+    if (m_moonlight.isEmpty()) m_moonlight = QStandardPaths::findExecutable("moonlight-qt");
     if (m_demo) {
         m_catalog = QJsonDocument::fromJson(R"([
           {"computer":"studio","name":"Studio Mac","host":"studio.example.net","platform":"macos","default_profile":"desktop","profiles":["desktop","presentation"]},
           {"computer":"work","name":"Work laptop","host":"work.example.net","platform":"windows","default_profile":"desktop","profiles":["desktop"]},
           {"computer":"lab","name":"Linux workstation","host":"lab.example.net","platform":"linux","default_profile":"desktop","profiles":["desktop"]}
         ])").array();
-        m_sessions = QJsonDocument::fromJson(R"([{"computer":"studio","profile":"desktop","phase":"window-ready","desired":true,"window":{"address":"demo"}},{"computer":"work","phase":"idle","desired":false},{"computer":"lab","phase":"idle","desired":false}])").array();
+        m_sessions = QJsonDocument::fromJson(R"([{"computer":"studio","profile":"desktop","phase":"window-ready","desired":true,"window":{"address":"demo"},"client_version":"6.1.0","evidence":{"negotiated_video":{"width":2560,"height":1440,"fps":60}}},{"computer":"work","phase":"idle","desired":false},{"computer":"lab","phase":"idle","desired":false}])").array();
+        auto studio = m_sessions[0].toObject();
+        studio["launched_at"] = now() - 754;
+        m_sessions[0] = studio;
         m_available = true; m_loading = false;
     } else {
         QTimer::singleShot(0, this, &Manager::refresh);
@@ -46,8 +56,16 @@ QVariantList Manager::computers() const {
     }
     return out;
 }
+QString Manager::label(const QString &computer) const {
+    for (const auto &entry : m_catalog) if (entry.toObject()["computer"].toString() == computer) {
+        const auto name = entry.toObject()["name"].toString();
+        if (!name.isEmpty()) return name;
+    }
+    return computer;
+}
 void Manager::publish() { emit changed(); }
-void Manager::clearNotice() { m_notice.clear(); publish(); }
+void Manager::clearNotice() { m_notice.clear(); m_noticeError = false; publish(); }
+void Manager::notify(QString text, bool error) { m_notice = std::move(text); m_noticeError = error; publish(); }
 void Manager::setActive(bool active) {
     m_active = active;
     if (m_demo) return;
@@ -79,7 +97,10 @@ void Manager::process(QStringList arguments, std::function<void(bool, QByteArray
     connect(job, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
             [output, failure, finish](int code, QProcess::ExitStatus status) {
         const bool ok = code == 0 && status == QProcess::NormalExit;
-        finish(ok, ok ? *output : (failure->isEmpty() ? QByteArray("The request failed. Refresh to check the current state.") : *failure));
+        QByteArray message = failure->trimmed();
+        // The CLI prefixes its own name; the manager already provides that context.
+        if (message.startsWith("remote-desktops: ")) message = message.mid(17);
+        finish(ok, ok ? *output : (message.isEmpty() ? QByteArray("The request failed. Refresh to check the current state.") : message));
     });
     connect(deadline, &QTimer::timeout, this, [job, finish] {
         job->kill(); finish(false, "The request timed out. Its outcome may still be pending; refresh before retrying.");
@@ -144,20 +165,37 @@ void Manager::act(QString computer, QString action, QString profile) {
     for (const auto &entry : computers()) if (entry.toMap()["computer"].toString() == computer) known = true;
     if (!known) return;
     if (m_demo) {
-        m_busy.insert(computer); publish();
-        QTimer::singleShot(650, this, [this, computer, action, profile] {
+        // The preview walks through the same intermediate phases a real
+        // session reports, so transitional states can be seen and tested.
+        auto set = [this, computer](std::function<void(QJsonObject &)> change) {
             for (qsizetype i = 0; i < m_sessions.size(); ++i) if (m_sessions[i].toObject()["computer"].toString() == computer) {
-                auto s = m_sessions[i].toObject();
-                if (action != "focus" && action != "launcher") {
-                    bool connected = action == "connect" || action == "reconnect";
-                    s["phase"] = connected ? "window-ready" : "idle"; s["desired"] = connected;
-                    s["window"] = connected ? QJsonValue(QJsonObject{{"address", "demo"}}) : QJsonValue();
-                    s["error"] = QJsonValue(); s["recovery_pending"] = false;
-                    if (!profile.isEmpty()) s["profile"] = profile;
-                    m_sessions[i] = s;
-                }
+                auto s = m_sessions[i].toObject(); change(s); m_sessions[i] = s;
             }
-            m_busy.remove(computer); m_notice = "Preview only — no real computer was changed."; publish();
+        };
+        m_busy.insert(computer); m_notice.clear(); m_noticeError = false; publish();
+        QTimer::singleShot(350, this, [this, computer, action, profile, set] {
+            m_busy.remove(computer);
+            if (action == "focus" || action == "launcher") {
+                m_notice = action == "launcher" ? "Preview only — a launcher entry would be installed." : "Preview only — the desktop window would be focused.";
+                publish(); return;
+            }
+            const bool connecting = action == "connect" || action == "reconnect";
+            set([&](QJsonObject &s) {
+                s["phase"] = action == "connect" ? "connecting" : action == "reconnect" ? "reconnecting" : action == "restore" ? "restoring" : "stopping";
+                s["desired"] = connecting; s["window"] = QJsonValue(); s["error"] = QJsonValue();
+                if (!profile.isEmpty()) s["profile"] = profile;
+            });
+            publish();
+            QTimer::singleShot(900, this, [this, connecting, set] {
+                set([&](QJsonObject &s) {
+                    s["phase"] = connecting ? "window-ready" : "idle";
+                    s["window"] = connecting ? QJsonValue(QJsonObject{{"address", "demo"}}) : QJsonValue();
+                    s["recovery_pending"] = false; s["error"] = QJsonValue();
+                    if (connecting) { s["launched_at"] = now(); s["client_version"] = "6.1.0"; }
+                    else s.remove("launched_at");
+                });
+                publish();
+            });
         });
         return;
     }
@@ -165,25 +203,83 @@ void Manager::act(QString computer, QString action, QString profile) {
     if (action == "launcher") args << "launcher" << "install" << computer;
     else args << action << computer;
     if (action == "connect" && !profile.isEmpty()) args << "--profile" << profile;
-    m_busy.insert(computer); m_notice.clear(); publish();
+    m_busy.insert(computer); m_notice.clear(); m_noticeError = false; publish();
     process(args, [this, computer, action](bool ok, QByteArray data) {
         m_busy.remove(computer);
-        m_notice = ok ? (action == "launcher" ? "Launcher added. Find this computer in your app launcher and Scenes." : "Request accepted. Connection status will update shortly.")
-                      : QString::fromUtf8(data).trimmed();
+        // Accepted connection commands are visible through status itself;
+        // only results with no other visible effect are announced.
+        if (!ok) { m_notice = QString::fromUtf8(data).trimmed(); m_noticeError = true; }
+        else if (action == "launcher") m_notice = label(computer) + " was added to your app launcher.";
         poll(); publish();
     });
+}
+void Manager::remove(QString computer) {
+    if (m_busy.contains(computer)) return;
+    const QString name = label(computer);
+    auto forget = [this, computer] {
+        for (qsizetype i = m_catalog.size() - 1; i >= 0; --i) if (m_catalog[i].toObject()["computer"].toString() == computer) m_catalog.removeAt(i);
+        for (qsizetype i = m_sessions.size() - 1; i >= 0; --i) if (m_sessions[i].toObject()["computer"].toString() == computer) m_sessions.removeAt(i);
+        m_demoDrafts.remove(computer);
+    };
+    m_busy.insert(computer); m_notice.clear(); m_noticeError = false; publish();
+    if (m_demo) {
+        QTimer::singleShot(400, this, [this, computer, name, forget] {
+            m_busy.remove(computer); forget();
+            m_notice = name + " was removed from the preview."; publish();
+        });
+        return;
+    }
+    process({"--json", "settings", "remove", computer}, [this, computer, name, forget](bool ok, QByteArray data) {
+        m_busy.remove(computer);
+        if (ok) { forget(); m_notice = name + " was removed."; }
+        else { m_notice = QString::fromUtf8(data).trimmed(); m_noticeError = true; }
+        loadCatalog(); poll(); publish();
+    });
+}
+void Manager::startService() {
+    if (m_serviceBusy) return;
+    if (m_demo) { m_available = true; m_notice = "Preview only — the service is simulated."; m_noticeError = false; publish(); return; }
+    m_serviceBusy = true; m_notice.clear(); m_noticeError = false; publish();
+    process({"--json", "start"}, [this](bool ok, QByteArray data) {
+        m_serviceBusy = false;
+        if (!ok) { m_notice = QString::fromUtf8(data).trimmed(); m_noticeError = true; }
+        poll(); publish();
+    });
+}
+void Manager::openMoonlight() {
+    if (m_demo) { m_notice = "Preview only — Moonlight would open for pairing."; m_noticeError = false; publish(); return; }
+    if (m_moonlight.isEmpty() || !QProcess::startDetached(m_moonlight, {})) {
+        m_notice = "Moonlight could not be started. Open it from your app launcher to pair a computer."; m_noticeError = true; publish();
+    }
 }
 void Manager::copy(QString text) { QGuiApplication::clipboard()->setText(text); }
 void Manager::demoState(QString phase) {
     if (!m_demo) return;
     if (phase == "empty") { m_catalog = {}; m_sessions = {}; publish(); return; }
     if (phase == "unavailable") { m_available = false; publish(); return; }
+    if (phase == "many") {
+        for (int i = 1; i <= 9; ++i) {
+            const QString id = QString("extra-%1").arg(i);
+            m_catalog.append(QJsonObject{{"computer", id}, {"name", QString("Office desk %1").arg(i)}, {"host", id + ".example.net"}, {"platform", "linux"}, {"default_profile", "desktop"}, {"profiles", QJsonArray{"desktop"}}});
+            m_sessions.append(QJsonObject{{"computer", id}, {"phase", "idle"}, {"desired", false}});
+        }
+        publish(); return;
+    }
+    if (phase == "unconfigured") {
+        m_sessions.append(QJsonObject{{"computer", "old-desk"}, {"phase", "restore-pending"}, {"desired", false}, {"recovery_pending", true},
+            {"error", "host-unreachable: the host did not answer. Its original display settings are saved."}});
+        publish(); return;
+    }
     if (m_sessions.isEmpty()) return;
     auto s = m_sessions[0].toObject();
-    s["phase"] = phase; s["desired"] = phase == "window-ready" || phase == "preflight";
+    s["phase"] = phase; s["desired"] = phase == "window-ready" || phase == "preflight" || phase == "connecting" || phase == "running";
     s["window"] = phase == "window-ready" ? QJsonValue(QJsonObject{{"address", "demo"}}) : QJsonValue();
     s["recovery_pending"] = phase == "restore-pending";
-    s["error"] = phase == "restore-pending" ? "The host is unreachable. Its original display settings are saved; restore when it is reachable again." : "";
+    s["error"] = phase == "restore-pending" ? "The host is unreachable. Its original display settings are saved; restore when it is reachable again."
+               : phase == "attention" ? "host-unreachable: Sunshine did not answer on studio.example.net:47989" : "";
+    if (phase == "running") { s["launched_at"] = now() - 41; s["client_version"] = "6.1.0"; s.remove("evidence"); }
+    else if (phase != "window-ready") { s.remove("launched_at"); s.remove("evidence"); }
+    if (phase == "preflight") { s["attempts"] = 2; s["next_retry"] = now() + 5; s["error"] = "host-unreachable: Sunshine did not answer; retrying"; }
     m_sessions[0] = s; publish();
 }
 
@@ -206,7 +302,7 @@ void Manager::setup(QString action, QVariantMap draft) {
                 m_catalog[i] = old; found = true;
             }
             if (!found) m_catalog.append(entry);
-            m_notice = "Computer saved. Changes apply to the next new connection.";
+            m_notice = entry["name"].toString() + " was saved. Changes apply to the next new connection."; m_noticeError = false;
         }
         emit setupFinished(action, valid, valid ? document.object().toVariantMap() : QVariantMap{},
                            valid ? QString{} : ok ? "The backend returned invalid settings." : QString::fromUtf8(data).trimmed());
@@ -214,7 +310,7 @@ void Manager::setup(QString action, QVariantMap draft) {
         publish();
     };
     if (m_demo) {
-        QTimer::singleShot(200, this, [this, action, draft, complete] {
+        QTimer::singleShot(action == "test" ? 1100 : 300, this, [this, action, draft, complete] {
             QJsonObject result;
             if (action == "catalog") {
                 result = QJsonObject{{"revision", "preview"}, {"paired", QJsonArray{QJsonObject{{"pairing_uuid", "11111111-2222-3333-4444-555555555555"}, {"name", "Home workstation"}, {"host", "home.example.net"}, {"configured", m_demoDrafts.contains("home-workstation-11111111")}}}}};
@@ -238,7 +334,7 @@ void Manager::setup(QString action, QVariantMap draft) {
                 for (qsizetype i=0; i<m_catalog.size(); ++i) if (m_catalog[i].toObject()["computer"] == entry["computer"]) { m_catalog[i] = entry; found = true; }
                 if (!found) { m_catalog.append(entry); m_sessions.append(QJsonObject{{"computer", entry["computer"]}, {"phase", "idle"}, {"desired", false}}); }
                 result["saved"] = true; result["computer"] = entry["computer"];
-                m_notice = "Preview settings saved. No real computer was changed.";
+                m_notice = entry["name"].toString() + " was saved in the preview."; m_noticeError = false;
             }
             complete(true, QJsonDocument(result).toJson(QJsonDocument::Compact));
         });

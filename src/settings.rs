@@ -23,6 +23,41 @@ pub enum Action {
     Test,
     /// Atomically save a JSON draft from stdin; existing sessions keep their snapshot.
     Save,
+    /// Remove a computer, its launcher entry, and its settled session record.
+    Remove { computer: String },
+}
+// A session record is only dropped once nothing owns it: no desired intent,
+// no live client, and no pending host recovery journal.
+async fn forget(paths: &Paths, computer: &str) -> Result<()> {
+    let directory = paths.session(computer);
+    if !directory.join("session.json").exists() {
+        return Ok(());
+    }
+    if tokio::net::UnixStream::connect(paths.socket())
+        .await
+        .is_ok()
+    {
+        crate::server::request(paths, &json!({"command":"forget","computer":computer})).await?;
+        return Ok(());
+    }
+    // No service answers. Holding its writer lock proves none owns the record.
+    let _writer = storage::lock(&paths.state.join("writer.lock"), true)
+        .context("The service is running but not responding. Try again.")?;
+    let record: Value = storage::read(&directory.join("session.json"))?;
+    if record["desired"] == true {
+        bail!("Disconnect this computer before removing it.");
+    }
+    let recovery = directory.join("recovery.json");
+    if recovery.exists() && host::pending(&recovery)? {
+        bail!("restore-pending: restore the host display before removing this computer");
+    }
+    if !matches!(record["phase"].as_str(), Some("idle" | "attention")) {
+        bail!(
+            "This computer is still finishing its last session. Wait until it is idle before removing it."
+        );
+    }
+    std::fs::remove_dir_all(&directory)?;
+    Ok(())
 }
 fn load(paths: &Paths) -> Result<Value> {
     match storage::read(&paths.config) {
@@ -177,6 +212,48 @@ pub async fn run(paths: &Paths, action: &Action) -> Result<Value> {
             let mut result = editable(computer, c, &revision(&value));
             redact_profiles(&mut result);
             Ok(result)
+        }
+        Action::Remove { computer } => {
+            if !storage::valid_id(computer) {
+                bail!("invalid computer ID");
+            }
+            let configured = value["computers"].get(computer).is_some();
+            if !configured && !paths.session(computer).join("session.json").exists() {
+                bail!("unknown computer");
+            }
+            forget(paths, computer).await?;
+            let launcher = crate::launcher::Action::Remove {
+                computer: computer.clone(),
+            };
+            let launcher = match crate::launcher::run(paths, &launcher).await {
+                Ok(v) => v["removed"].clone(),
+                // A launcher file another application owns is preserved.
+                Err(e) if e.to_string().contains("another application") => json!(false),
+                Err(e) => return Err(e),
+            };
+            if configured {
+                storage::private_dir(paths.config.parent().context("missing config directory")?)?;
+                let _lock = storage::lock(&paths.config.with_extension("lock"), true)
+                    .context("Another settings save is in progress. Try again.")?;
+                if paths
+                    .config
+                    .symlink_metadata()
+                    .is_ok_and(|m| m.file_type().is_symlink())
+                {
+                    bail!("Configuration is a symbolic link. Edit its source file directly.");
+                }
+                let mut next = load(paths)?;
+                if next["computers"]
+                    .as_object_mut()
+                    .context("invalid computers schema")?
+                    .remove(computer)
+                    .is_some()
+                {
+                    host::call(json!({"operation":"validate-value","value":next})).await?;
+                    storage::write(&paths.config, &next)?;
+                }
+            }
+            Ok(json!({"removed":true,"computer":computer,"launcher":launcher}))
         }
         Action::Test | Action::Save => {
             let mut input = String::new();

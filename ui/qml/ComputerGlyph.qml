@@ -1,4 +1,5 @@
 import QtQuick
+// Simple device outline; laptops get a base line, desktops a stand.
 Item {
     id: icon
     property color ink: theme.colors.secondary
