@@ -26,18 +26,20 @@ release metadata, tags, or GitHub settings.
 
 - `.github/workflows/test.yml` defines the checks. Keep CI running on pushes to
   `develop` and `main`, and on every PR without path filters.
-- Run `python3 scripts/check.py` and `python3 -m unittest discover -s tests -v`
-  locally before submitting changes. Add runtime suites as code is extracted.
-- Before merging, both GitHub checks `test` and `windows-check` must pass on the
+- Run the repository check, Rust format/clippy/tests/build, Python host tests,
+  and `python3 tests/integration.py -v` locally, as listed in the workflow.
+  Tests must use isolated fake clients/hosts; real streaming validation is separate.
+- Before merging, all GitHub checks `test`, `windows-check`, and `windows-display-policy` must pass on the
   current PR revision, with the branch up to date and conversations resolved.
   No additional reviewer is required for this solo-maintainer repository.
 - Rebase merge with the checked head SHA. For an authorized integration-branch
   rewrite, follow the lease and protection-restoration steps in RELEASING.md.
 - Fix failures without weakening, skipping, or renaming required checks to
   evade protection. Read-only job permissions are the default.
-- The bootstrap checks validate repository content and the validation tools on
-  Linux and Windows. They do not validate streaming or Windows display policy.
-  Import the actual policy suite and add its required check with that code.
+- `test` exercises the Rust/Linux backend and Python recovery algorithms;
+  `windows-check` checks portable repository/transport behavior;
+  `windows-display-policy` runs the real PowerShell policy/journal suite.
+  None of these jobs proves actual video streaming on a real host.
 - Distinguish mocked checks from actual macOS/Windows streaming and recovery
   validation. Use a Windows runner for Windows checks; never claim an unavailable
   local platform test passed.
@@ -45,6 +47,16 @@ release metadata, tags, or GitHub settings.
   registries or marketplace submissions, or install code on a user's desktop.
 - Follow `docs/RELEASING.md` for an authorized release. A green CI run is not
   release authorization or upstream Omarchy approval.
+
+## Code stack
+
+- Keep the daemon, CLI, and client supervisor in Rust. Preserve the narrow Python
+  host-operation boundary and its durable recovery tests when changing adapters.
+- The planned UI is a separate Qt 6/QML process. Keep video/audio/input in
+  Moonlight/Sunshine and keep Qt dependencies out of the daemon.
+- Read `docs/ARCHITECTURE.md` before changing concurrency, IPC, supervision, or
+  recovery ownership. Measure performance rather than claiming latency gains
+  from the programming language or mock-client timing.
 
 ## Application boundaries and migration
 

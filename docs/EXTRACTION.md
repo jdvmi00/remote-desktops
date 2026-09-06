@@ -1,5 +1,11 @@
 # Extraction from Hypertile
 
+The first backend extraction is implemented on `develop`; see
+[architecture](ARCHITECTURE.md), [usage](BACKEND.md), and
+[provenance](PROVENANCE.md). No live configuration or controller ownership has
+been migrated. Launcher entries, graphical UI, Scenes support, and packaging
+remain subsequent features.
+
 ## Boundary
 
 Remote Desktops owns computer/profile configuration, managed Moonlight

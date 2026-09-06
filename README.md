@@ -8,10 +8,12 @@ Hypertile Scene like any other application.
 
 ## Status
 
-Project initialized; the application has not been extracted or packaged yet.
-There is no standalone installation or runnable release at this stage.
+The standalone backend is implemented on `develop`: a Rust daemon and CLI with
+Moonlight process supervision and journaled host recovery. The graphical manager,
+desktop launcher entries, and installable packaging are not implemented yet.
+`main` remains the locked project bootstrap; there is no published app release.
 
-The initial implementation will come from the remote-stream work in
+The host adapters come from the remote-stream work in
 [Hypertile](https://github.com/jdvmi00/hypertile). Moonlight remains the video
 client and Sunshine remains the remote host. This project will manage computer
 profiles, connection lifecycle, host display recovery, and user controls.
@@ -37,16 +39,38 @@ Use a feature branch from `develop` and rebase merge its PR into `develop`. `mai
 remains locked between authorized releases. See [AGENTS.md](AGENTS.md) and
 [the development and release workflow](docs/RELEASING.md).
 
-Run the bootstrap checks locally:
+Build and run from the checkout on Linux (Python 3 and Rust are required):
+
+```sh
+cargo build --locked --release
+./target/release/remote-desktops --help
+./target/release/remote-desktops computers
+./target/release/remote-desktops connect macbook
+./target/release/remote-desktops status --json
+./target/release/remote-desktops disconnect macbook
+```
+
+Configure and pair your computers first; see [backend usage](docs/BACKEND.md).
+The first connection starts the daemon if needed. Commands acknowledge intent;
+use `status` to observe connection or restoration progress.
+
+Run the checks locally:
 
 ```sh
 python3 scripts/check.py
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+cargo build --locked
 python3 -m unittest discover -s tests -v
+python3 tests/integration.py -v
 ```
 
-GitHub Actions runs these checks on Linux and Windows for every PR and pushes
-to `develop` and `main`. Application and host recovery suites will be added
-with the implementation; the current checks validate repository content only.
+GitHub Actions tests the Rust/Linux backend, Python host recovery, and the
+Windows PowerShell display policy on its native runner. Integration tests use
+isolated fake clients and hosts; they do not establish real streaming performance.
+See [architecture](docs/ARCHITECTURE.md) and [source provenance](docs/PROVENANCE.md).
+Initial local measurements and their limits are in [validation](docs/VALIDATION.md).
 
 ## License
 

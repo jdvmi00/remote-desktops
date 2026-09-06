@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "computers": {
+    "macbook": {
+      "host": "macbook.example.net",
+      "pairing_uuid": "12345678-1234-1234-1234-123456789abc",
+      "title": "MacBook - Moonlight",
+      "platform": "macos",
+      "default_profile": "desktop",
+      "profiles": {
+        "desktop": {
+          "stream_resolution": "2560x1440",
+          "fps": 60,
+          "bitrate": 60000,
+          "codec": "HEVC",
+          "decoder": "hardware",
+          "audio": "host",
+          "input": "absolute",
+          "system_keys": "never",
+          "keep_awake": "visible",
+          "display": { "adapter": "external" }
+        }
+      }
+    }
+  }
+}

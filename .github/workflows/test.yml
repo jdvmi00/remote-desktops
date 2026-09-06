@@ -16,7 +16,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,8 +26,17 @@ jobs:
           python-version: '3.14'
       - name: Repository validation
         run: python scripts/check.py
-      - name: Repository checker regression tests
+      - name: Rust format, lint, and tests
+        run: |
+          rustup show
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+          cargo build --locked
+      - name: Host recovery and repository tests
         run: python -m unittest discover -s tests -v
+      - name: Standalone daemon integration
+        run: python tests/integration.py -v
 
   windows-check:
     runs-on: windows-latest
@@ -42,4 +51,17 @@ jobs:
       - name: Repository validation on Windows
         run: python scripts/check.py
       - name: Repository checker regression tests on Windows
-        run: python -m unittest discover -s tests -v
+        run: python -m unittest discover -s tests -p test_repository.py -v
+      - name: Windows host transport and recovery tests
+        run: python -m unittest discover -s tests -p test_windows_display.py -v
+
+  windows-display-policy:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: PowerShell display policy and atomic journal
+        shell: powershell
+        run: .\remote_desktops\windows\Test.ps1 -PolicyOnly
