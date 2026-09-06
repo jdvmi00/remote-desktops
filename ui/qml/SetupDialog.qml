@@ -46,6 +46,7 @@ Sheet {
     }
     function fieldError(key, message) { return message.length > 0 && (attempted || touched[key] === true) ? message : "" }
     function valueLabel(list, value) { for (const item of list) if (item.value === value) return item.label; return value || "" }
+    readonly property var summaryRows: [["Name", draft.name || ""], ["Address", draft.host || ""], ["Operating system", ({macos: "macOS", windows: "Windows", linux: "Linux"})[draft.platform] || "Not specified"], ["Quality", summary()], ["Mouse", valueLabel(inputs, draft.input || "absolute")], ["Audio", valueLabel(audios, draft.audio || "focus")]]
     function summary() { return (draft.stream_resolution || "") + " · " + (draft.fps || 60) + " fps · " + Math.round((draft.bitrate || 0) / 1000) + " Mbit/s · " + valueLabel(codecs, draft.codec || "auto") + " codec" }
     function begin(computer) {
         if (manager.setupBusy) return
@@ -122,11 +123,13 @@ Sheet {
     component Problem: Label { Layout.fillWidth: true; visible: text.length > 0; wrapMode: Text.WordWrap; color: theme.colors.danger; font.pointSize: theme.type.caption; Accessible.role: Accessible.AlertMessage }
     component Progress: Rectangle {
         id: bar
+        // Hidden pages keep their own visible flag, so the owner says when to animate.
+        property bool active: true
         Layout.fillWidth: true; height: 3; radius: 1.5; color: theme.colors.border; clip: true
         Accessible.role: Accessible.ProgressBar
         Rectangle {
             width: parent.width * .3; height: parent.height; radius: 1.5; color: theme.colors.accent
-            SequentialAnimation on x { running: bar.visible; loops: Animation.Infinite; NumberAnimation { from: -bar.width * .3; to: bar.width; duration: 1300; easing.type: Easing.InOutQuad } }
+            SequentialAnimation on x { running: bar.active; loops: Animation.Infinite; NumberAnimation { from: -bar.width * .3; to: bar.width; duration: 1300; easing.type: Easing.InOutQuad } }
         }
     }
     component Input: Field { onActiveFocusChanged: if (activeFocus) setup.reveal(this) }
@@ -174,7 +177,7 @@ Sheet {
                     visible: manager.setupBusy && !setup.paired.length
                     Layout.fillWidth: true; spacing: 10
                     Body { text: "Looking for paired computers…" }
-                    Progress {}
+                    Progress { active: parent.visible }
                 }
                 ColumnLayout {
                     visible: setup.loaded && !setup.paired.length && !manager.setupBusy
@@ -312,7 +315,7 @@ Sheet {
                 visible: setup.step === 1 && !setup.loaded
                 Layout.fillWidth: true; spacing: 10
                 Body { text: "Loading settings…" }
-                Progress {}
+                Progress { active: parent.visible }
             }
             // Step: check and save.
             ColumnLayout {
@@ -326,18 +329,16 @@ Sheet {
                         id: summaryGrid
                         anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 16
                         columns: 2; columnSpacing: 20; rowSpacing: 8
+                        // Fixed count: values update in place rather than rebuilding delegates.
                         Repeater {
-                            model: [["Name", setup.draft.name || ""], ["Address", setup.draft.host || ""], ["Operating system", ({macos: "macOS", windows: "Windows", linux: "Linux"})[setup.draft.platform] || "Not specified"], ["Quality", setup.summary()], ["Mouse", setup.valueLabel(setup.inputs, setup.draft.input || "absolute")], ["Audio", setup.valueLabel(setup.audios, setup.draft.audio || "focus")]]
-                            delegate: Repeater {
-                                required property var modelData
-                                model: 2
-                                delegate: Label {
-                                    required property int index
-                                    Layout.fillWidth: index === 1
-                                    text: modelData[index]; textFormat: Text.PlainText; wrapMode: Text.WordWrap
-                                    color: index === 0 ? theme.colors.muted : theme.colors.text
-                                    font.pointSize: index === 0 ? theme.type.caption : theme.type.body
-                                }
+                            model: setup.summaryRows.length * 2
+                            delegate: Label {
+                                required property int index
+                                readonly property var row: setup.summaryRows[Math.floor(index / 2)] || ["", ""]
+                                Layout.fillWidth: index % 2 === 1
+                                text: row[index % 2]; textFormat: Text.PlainText; wrapMode: Text.WordWrap
+                                color: index % 2 === 0 ? theme.colors.muted : theme.colors.text
+                                font.pointSize: index % 2 === 0 ? theme.type.caption : theme.type.body
                             }
                         }
                     }
@@ -346,7 +347,7 @@ Sheet {
                     visible: setup.checking
                     Layout.fillWidth: true; spacing: 10
                     Body { text: "Checking reachability, Moonlight pairing, and the Desktop app. This does not start a stream or change the host display." }
-                    Progress {}
+                    Progress { active: parent.visible }
                 }
                 RowLayout {
                     visible: setup.tested && !setup.checking
