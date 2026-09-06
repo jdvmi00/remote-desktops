@@ -9,8 +9,8 @@ Hypertile Scene like any other application.
 ## Status
 
 The standalone backend is implemented on `develop`: a Rust daemon and CLI with
-Moonlight process supervision and journaled host recovery. The graphical manager,
-desktop launcher entries, and installable packaging are not implemented yet.
+Moonlight process supervision, journaled host recovery, and per-computer desktop
+launcher entries. The graphical manager and installable packaging are not implemented yet.
 `main` remains the locked project bootstrap; there is no published app release.
 
 The host adapters come from the remote-stream work in
@@ -45,12 +45,16 @@ Build and run from the checkout on Linux (Python 3 and Rust are required):
 cargo build --locked --release
 ./target/release/remote-desktops --help
 ./target/release/remote-desktops computers
+./target/release/remote-desktops launcher install macbook
+./target/release/remote-desktops open macbook
 ./target/release/remote-desktops connect macbook
 ./target/release/remote-desktops status --json
 ./target/release/remote-desktops disconnect macbook
 ```
 
 Configure and pair your computers first; see [backend usage](docs/BACKEND.md).
+See [desktop launchers and window matching](docs/LAUNCHERS.md) for application
+menu entries, existing-window reuse, and the matching contract for future Scenes.
 The first connection starts the daemon if needed. Commands acknowledge intent;
 use `status` to observe connection or restoration progress.
 

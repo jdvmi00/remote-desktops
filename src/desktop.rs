@@ -156,6 +156,18 @@ pub async fn action(window: &Window, action: &str) -> Result<()> {
         }
         _ => bail!("unsupported window action"),
     };
+    dispatch_checked(window, dispatch).await
+}
+pub async fn initialize(window: &Window, computer: &str) -> Result<()> {
+    let tag = lua_string(&format!("+remote-desktops-{computer}"));
+    dispatch_checked(
+        window,
+        &format!("hl.dsp.window.tag({{window='address:'..w.address,tag={tag}}})"),
+    )
+    .await?;
+    dispatch_checked(window, "hl.dsp.window.fullscreen_state({window='address:'..w.address,internal=0,client=0,action='set'})").await
+}
+async fn dispatch_checked(window: &Window, dispatch: &str) -> Result<()> {
     // Revalidate all identity fields inside the compositor, atomically with
     // the dispatch. Never act on a recycled address based on a cached snapshot.
     let code = format!(

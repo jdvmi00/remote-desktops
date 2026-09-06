@@ -85,3 +85,27 @@ latency were not independently verified. Windows live streaming and recovery
 still require separate host validation. These observations supplement the
 isolated regression suite; they do not turn mock performance samples into
 streaming performance measurements.
+
+## Per-computer launcher validation
+
+The next live MacBook test installed the generated desktop entry and launched
+it using `gtk-launch remote-desktops-macbook`, exercising the desktop entry's
+actual Exec command. `desktop-file-validate` accepted the entry. The final window
+had internal/client fullscreen state zero, the expected exact class/title, and
+the static `remote-desktops-macbook` tag. Video negotiated at 2560x1440/60.
+
+The test then explicitly enabled fullscreen and reopened the desktop entry.
+After twelve seconds, both fullscreen and the original client PID were preserved.
+Restarting the daemon and opening the desktop entry again adopted the same
+process without resetting fullscreen. There was exactly one matching window.
+
+The automated suite additionally covers launcher installation/removal, preserving
+unrelated files, Exec escaping, unique configured window titles, two concurrent
+clients, ignoring temporary startup titles, and startup policy only once per
+matched window. The current suite contains eight Rust tests, thirty Python
+repository/host tests, and fourteen daemon integration tests.
+
+The earlier fullscreen integration issue is now handled once at initial window
+matching. A brief startup transition remains possible. Separate Wayland taskbar
+grouping is not promised because Moonlight shares one application ID. Generic
+Hypertile Scenes consumption and GUI configuration remain separate features.

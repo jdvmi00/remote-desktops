@@ -53,6 +53,8 @@ pub struct Session {
     pub closing_at: Option<u64>,
     pub launched_at: u64,
     pub window: Option<Window>,
+    #[serde(default)]
+    pub initialized_window: Option<String>,
     pub evidence: Value,
 }
 impl Session {
@@ -77,6 +79,7 @@ impl Session {
             closing_at: None,
             launched_at: 0,
             window: None,
+            initialized_window: None,
             evidence: json!({}),
         }
     }
@@ -145,7 +148,7 @@ impl Manager {
         json!({"computer":r.computer,"profile":r.profile,"desired":r.desired,"phase":r.phase,"error":r.error,
             "generation":r.generation,"pid":if supervisor::alive(&job) {job.pid} else {None},"window":r.window,
             "evidence":r.evidence,"recovery_pending":pending,"recovery_error":recovery_error,
-            "resolved":recovery["resolved"]})
+            "resolved":recovery["resolved"],"launcher":crate::launcher::identity(&r.computer,&r.config)})
     }
     pub async fn command(self: &Arc<Self>, request: Value) -> Result<Value> {
         let action = request["command"].as_str().context("missing command")?;
@@ -524,6 +527,19 @@ impl Manager {
                         && Some(w.title.as_str()) == r.config["title"].as_str()
                 })
                 .cloned();
+            if let Some(w) = &window {
+                let key = format!("{}:{}:{}", job.token, w.pid, w.stable_id);
+                if r.initialized_window.as_ref() != Some(&key) {
+                    // Consume startup policy durably before dispatch: a crash
+                    // must not cause a restart to undo a later user choice.
+                    self.update(name, |r| r.initialized_window = Some(key))?;
+                    if let Err(e) = desktop::initialize(w, name).await {
+                        self.update(name, |r| {
+                            r.error = Some(format!("window initialization: {e}"))
+                        })?;
+                    }
+                }
+            }
             let changed_visibility = window.as_ref().map(|w| (&w.stable_id, w.pid, w.visible))
                 != r.window.as_ref().map(|w| (&w.stable_id, w.pid, w.visible));
             if changed_visibility && let Some(w) = &window {
@@ -628,9 +644,16 @@ pub async fn serve(paths: Paths) -> Result<()> {
         if !path.exists() {
             continue;
         }
-        let r: Session = storage::read(&path)?;
+        let mut r: Session = storage::read(&path)?;
         if r.version != 1 || r.computer != name {
             bail!("unsupported session state");
+        }
+        // Adopt windows from the pre-launcher schema without changing an
+        // already-running window's fullscreen state during upgrade.
+        if r.initialized_window.is_none()
+            && let (Some(w), Some(token)) = (&r.window, &r.token)
+        {
+            r.initialized_window = Some(format!("{token}:{}:{}", w.pid, w.stable_id));
         }
         sessions.insert(name, r);
     }

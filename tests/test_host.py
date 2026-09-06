@@ -115,6 +115,13 @@ class MainHost(Host):
         return Pinned()
 
 class RecoveryTests(unittest.TestCase):
+    def test_duplicate_window_titles_are_rejected_for_stable_launcher_matching(self):
+        first, second = computer(), computer()
+        second["pairing_uuid"] = BUILTIN
+        self.config.write_text(json.dumps({"version": 1, "computers": {"one": first, "two": second}}))
+        with self.assertRaisesRegex(ValueError, "window titles must be unique"):
+            s.configuration(self.config)
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

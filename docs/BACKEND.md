@@ -5,11 +5,10 @@ Qt, and a graphical user session to show remote windows. Hyprland window control
 uses its current Lua dispatch and stable window IDs, without any Hypertile Lua
 module. The Rust toolchain is pinned in `rust-toolchain.toml`.
 
-Omarchy currently ships a Moonlight window rule that requests fullscreen, even
-when the client is launched with `--display-mode windowed`. Use Super+F to leave
-fullscreen when testing ordinary window movement. The backend does not override
-desktop window rules. Per-app launcher/packaging integration must address this
-default without repeatedly undoing the user's later fullscreen choices.
+Omarchy ships a Moonlight rule that requests fullscreen even with
+`--display-mode windowed`. The backend now clears fullscreen once on the first
+matched window of a new stream. Later user fullscreen choices are preserved.
+See [launchers](LAUNCHERS.md) for identity and startup details.
 
 ## Configuration
 
@@ -85,7 +84,8 @@ their recovery journals before an explicitly planned handoff. The new daemon
 refuses an active legacy controller and refuses matching outstanding legacy
 session/recovery intent. It never adopts old journal files automatically.
 
-No installer or live migration is included in this feature. Run the binary
+Desktop entries can be installed explicitly with `launcher install COMPUTER`.
+No package installer or automatic live migration is included. Run the binary
 from its checkout so it can find the Python helper package. A future package
 can supply the helper root using `REMOTE_DESKTOPS_HELPERS`; this is a local
 development/package setting, not a remote host option.
