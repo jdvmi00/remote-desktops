@@ -8,6 +8,7 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+/target/
 .env
 .env.*
 !.env.example

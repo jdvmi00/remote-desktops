@@ -2,8 +2,9 @@
 
 ## Current state
 
-This repository contains project scaffolding. It has no standalone application,
-package, release version, or Omarchy marketplace submission yet.
+`develop` contains the standalone Rust backend and host adapters. `main` still
+contains the locked bootstrap. There is no published application release,
+installable package, graphical manager, or Omarchy marketplace submission yet.
 
 The initial CI/workflow bootstrap is complete. Its history was subsequently
 linearized at the owner's request. This is not an application release and
@@ -15,10 +16,12 @@ instruction; repairing existing history is governed separately below.
 1. Inspect git status and preserve existing work. Start a feature branch from
    current `develop`; do not develop directly on `main`.
 2. Implement changes and run the commands in `.github/workflows/test.yml`.
-   Currently these are `python3 scripts/check.py` and
-   `python3 -m unittest discover -s tests -v`.
+   Run the repository validator; `cargo fmt --check`;
+   `cargo clippy --all-targets --locked -- -D warnings`; `cargo test --locked`;
+   `cargo build --locked`; `python3 -m unittest discover -s tests -v`; and
+   `python3 tests/integration.py -v`.
 3. Push the feature branch and open a PR targeting `develop`.
-4. Wait for `test` and `windows-check` on the current PR revision. Resolve
+4. Wait for `test`, `windows-check`, and `windows-display-policy` on the current PR revision. Resolve
    conversations and rebase onto the base branch when GitHub requires it.
 5. Rebase merge through the PR using its checked head SHA, without admin bypass.
    Do not use merge commits or squash merging. Keep working from `develop`.
@@ -54,16 +57,16 @@ unlock or rewrite `main` outside a release.
 
 ## What CI proves today
 
-`test` runs on Ubuntu and `windows-check` runs on a native Windows runner.
-Both validate tracked repository files, local Markdown file links, Python
-syntax, and the regression tests for the repository checker. Windows checkout
-uses LF endings for text through `.gitattributes`.
+`test` runs the repository checks, Rust format/clippy/unit tests, Python host
+recovery tests, and real daemon/CLI/supervisor integration with fake hosts and
+clients on Ubuntu. `windows-check` validates repository content and Python
+Windows transport/recovery behavior on a native Windows runner.
+`windows-display-policy` runs the extracted PowerShell policy, C# ABI checks,
+and atomic journal tests on Windows. All three jobs are required.
 
-These checks do not establish Moonlight connectivity, host display recovery,
-macOS behavior, or Windows display policy. When extracting the backend, add its
-actual runtime suites in the same PR. When importing Windows display helpers,
-add and require `windows-display-policy` running the real PowerShell policy
-suite on Windows; do not substitute a successful placeholder job.
+These checks establish tested lifecycle and recovery contracts, not real
+Moonlight connectivity, video performance, or host hardware behavior. Real
+macOS/Windows streaming and display recovery require separate validation.
 
 CI has read-only repository permissions and does not install the application,
 touch real hosts, or publish anything. Release delivery is an explicit manual
