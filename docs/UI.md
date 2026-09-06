@@ -75,3 +75,22 @@ placeholder form or write unvalidated settings.
 The manager does not install itself, register a system service, migrate legacy
 configuration, or change Hypertile. Packaging and a graphical setup wizard are
 separate delivery steps.
+
+## Omarchy themes
+
+The manager automatically reads the active Omarchy palette from
+`$XDG_STATE_HOME/omarchy/current/theme/colors.toml` (normally
+`~/.local/state/omarchy/current/theme/colors.toml`). Background, foreground,
+accent, surfaces, and warning/destructive colors follow that theme. Derived
+colors support light and dark palettes, with contrast-adjusted text for
+buttons and recovery messages.
+
+Filesystem notifications update the palette without restarting the manager or
+its connections, including when Omarchy replaces the entire theme directory.
+There are no installed hooks, theme-file writes, subprocesses, or periodic
+palette polling. Outside Omarchy, a built-in palette is used. Partial, malformed,
+or temporarily missing theme files retain the last complete palette.
+
+For isolated visual checks, pass `--theme-file /path/to/colors.toml`; the light
+fixture is `ui/tests/light.toml`. The reader accepts flat quoted `#RRGGBB` color
+assignments and ignores non-color metadata. It never executes theme code.

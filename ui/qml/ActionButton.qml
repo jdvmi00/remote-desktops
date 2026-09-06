@@ -18,15 +18,15 @@ Button {
     contentItem: Text {
         text: control.text
         font: control.font
-        color: !control.enabled ? "#747d85" : control.primary ? "#122820" : control.destructive ? "#f2b2a7" : "#e7ece8"
+        color: !control.enabled ? theme.colors.disabledText : control.primary ? theme.colors.onAccent : control.destructive ? theme.colors.danger : theme.colors.text
         horizontalAlignment: Text.AlignHCenter
         verticalAlignment: Text.AlignVCenter
     }
     background: Rectangle {
         radius: 9
-        color: !control.enabled ? "#20272b" : control.primary ? (control.down ? "#85c8a5" : control.hovered ? "#c5f3d6" : "#afe6c5") : control.hovered ? "#303a3e" : "#232c30"
+        color: !control.enabled ? theme.colors.disabled : control.primary ? (control.down ? theme.colors.accentPressed : control.hovered ? theme.colors.accentHover : theme.colors.accent) : control.hovered ? theme.colors.hover : theme.colors.surface
         border.width: control.visualFocus ? 2 : 1
-        border.color: control.visualFocus ? "#afe6c5" : control.primary ? "transparent" : "#3b474b"
+        border.color: control.visualFocus ? theme.colors.accent : control.primary ? "transparent" : theme.colors.border
         Behavior on color { ColorAnimation { duration: 110 } }
     }
 }

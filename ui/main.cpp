@@ -1,4 +1,5 @@
 #include "Manager.h"
+#include "Theme.h"
 #include <QCommandLineParser>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
@@ -17,6 +18,7 @@ int main(int argc, char **argv) {
     QQuickStyle::setStyle("Basic");
     QCommandLineParser parser;
     parser.addHelpOption();
+    parser.addOption({"theme-file", "Read a palette from this file (preview/testing).", "path"});
     parser.addOption({"demo", "Use synthetic computers; never access a real backend."});
     parser.addOption({"backend", "Absolute path to the Rust CLI.", "path"});
     parser.addOption({"smoke-test", "Render the demo and exit with failure on QML warnings."});
@@ -40,10 +42,12 @@ int main(int argc, char **argv) {
     }
     Manager manager(backend, qEnvironmentVariable("XDG_RUNTIME_DIR") + "/remote-desktops/control.sock", demo);
     if (parser.isSet("state")) manager.demoState(parser.value("state"));
+    Theme theme(parser.isSet("theme-file") ? parser.value("theme-file") : Theme::currentPath());
     QQmlApplicationEngine engine;
     bool warnings = false;
     QObject::connect(&engine, &QQmlEngine::warnings, &app, [&warnings](const QList<QQmlError> &errors) { warnings = true; for (const auto &error : errors) fprintf(stderr, "%s\n", qPrintable(error.toString())); });
     engine.rootContext()->setContextProperty("manager", &manager);
+    engine.rootContext()->setContextProperty("theme", &theme);
     engine.load(QUrl("qrc:/qml/Main.qml"));
     if (engine.rootObjects().isEmpty()) return 1;
     if (parser.isSet("compact")) { engine.rootObjects().first()->setProperty("width", 820); engine.rootObjects().first()->setProperty("height", 650); }

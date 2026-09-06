@@ -1,8 +1,10 @@
 #include "../Manager.h"
+#include "../Theme.h"
 #include <QtTest>
 #include <QLocalServer>
 #include <QTemporaryDir>
 #include <QFile>
+#include <QSaveFile>
 #include <QJsonDocument>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -16,9 +18,11 @@ private slots:
     void initTestCase() { QQuickStyle::setStyle("Basic"); QGuiApplication::setQuitOnLastWindowClosed(false); }
     void realQmlSelectionActionsAndRecovery() {
         Manager m("/missing", "/missing", true);
+        Theme theme("/missing/palette");
         QQmlApplicationEngine engine;
         QSignalSpy warnings(&engine, &QQmlEngine::warnings);
         engine.rootContext()->setContextProperty("manager", &m);
+        engine.rootContext()->setContextProperty("theme", &theme);
         engine.load(QUrl("qrc:/qml/Main.qml"));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
@@ -46,6 +50,44 @@ private slots:
         QCOMPARE(warnings.count(), 0);
         window->close();
         QCOMPARE(m.computers()[1].toMap()["phase"].toString(), QString("window-ready"));
+    }
+    void themeSurvivesAtomicFilesAndDirectoryReplacement() {
+        QTemporaryDir temp;
+        QString directory = temp.path() + "/current/theme";
+        QString path = directory + "/colors.toml";
+        Theme theme(path); // Theme may be installed after the app starts.
+        const auto fallback = theme.colors();
+        auto write = [&](QByteArray bg) {
+            QVERIFY(QDir().mkpath(directory));
+            QSaveFile file(path); QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("background = \"" + bg + "\"\nforeground = \"#eeeeee\"\naccent = \"#88ccaa\"\n");
+            QVERIFY(file.commit());
+        };
+        write("#202020");
+        QTRY_COMPARE(theme.colors()["bg"].value<QColor>(), QColor("#202020"));
+        QVERIFY(theme.colors() != fallback);
+        write("#303030");
+        QTRY_COMPARE(theme.colors()["bg"].value<QColor>(), QColor("#303030"));
+        QVERIFY(QDir().rename(directory, temp.path() + "/retired"));
+        write("#404040");
+        QTRY_COMPARE(theme.colors()["bg"].value<QColor>(), QColor("#404040"));
+        write("#505050"); // Watch is rearmed on the new directory inode.
+        QTRY_COMPARE(theme.colors()["bg"].value<QColor>(), QColor("#505050"));
+        auto valid = theme.colors();
+        QFile partial(path); QVERIFY(partial.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        partial.write("background = \"broken\"\n"); partial.close();
+        QTest::qWait(200);
+        QCOMPARE(theme.colors(), valid);
+        QSignalSpy changes(&theme, &Theme::changed);
+        write("#505050"); QTest::qWait(200);
+        QCOMPARE(changes.count(), 0);
+    }
+    void lightPaletteUsesReadableActionText() {
+        auto colors = Theme::palette({{"background", QColor("#ffffff")}, {"foreground", QColor("#222222")}, {"accent", QColor("#385ac3")}});
+        QCOMPARE(colors["bg"].value<QColor>(), QColor("#ffffff"));
+        QVERIFY(colors["onAccent"].value<QColor>().lightnessF() > .8);
+        QVERIFY(colors["muted"].value<QColor>().lightnessF() < .5);
+        QVERIFY(colors["warning"].value<QColor>().lightnessF() < .6);
     }
     void demoNeverTouchesBackend() {
         Manager m("/does/not/exist", "/does/not/exist", true);
