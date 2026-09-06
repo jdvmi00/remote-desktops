@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shlex
 import socket
 import subprocess
 import tempfile
@@ -77,6 +78,7 @@ class BackendTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.env = {**os.environ, "HOME": str(self.root), "XDG_STATE_HOME": str(self.root / "state"),
+                    "XDG_DATA_HOME": str(self.root / "data"),
                     "XDG_CONFIG_HOME": str(self.root / "config"), "XDG_RUNTIME_DIR": str(self.root / "runtime"),
                     "REMOTE_DESKTOPS_HELPERS": str(self.root / "helpers")}
         self.env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
@@ -274,6 +276,28 @@ class BackendTests(unittest.TestCase):
         sock.sendall(b"x" * 65_537)
         self.assertEqual(self.cli("status")["computers"], [])
 
+    def test_launcher_install_metadata_and_removal_preserve_other_apps(self):
+        installed = self.cli("launcher", "install", "laptop")
+        path = Path(installed["installed"])
+        self.assertEqual(path.parent, self.root / "data/applications")
+        entry = path.read_text()
+        self.assertIn("Name=laptop (Remote Desktop)", entry)
+        command = next(line[5:] for line in entry.splitlines() if line.startswith("Exec="))
+        self.assertEqual(shlex.split(command), [str(BIN), "open", "laptop"])
+        self.assertNotIn("StartupWMClass", entry)
+        metadata = installed["launcher"]["match"]
+        self.assertEqual(metadata["title"], "laptop - Moonlight")
+        self.assertEqual(metadata["tag"], "remote-desktops-laptop")
+        self.cli("launcher", "install", "other")
+        other = path.with_name("remote-desktops-other.desktop")
+        self.cli("launcher", "remove", "laptop")
+        self.assertFalse(path.exists())
+        self.assertTrue(other.exists())
+        path.write_text("[Desktop Entry]\nName=My own launcher\n")
+        self.assertNotEqual(self.cli("launcher", "install", "laptop", check=False).returncode, 0)
+        self.assertNotEqual(self.cli("launcher", "remove", "laptop", check=False).returncode, 0)
+        self.assertIn("My own launcher", path.read_text())
+
     def test_workspace_and_geometry_changes_never_place_or_restart_the_window(self):
         self.stop_daemon()
         self.env["HYPRLAND_INSTANCE_SIGNATURE"] = "test-instance"
@@ -316,9 +340,33 @@ class BackendTests(unittest.TestCase):
         self.assertNotIn("assignment", (self.session() / "session.json").read_text())
         commands = calls.read_text()
         self.assertNotIn("window.move", commands)
-        self.assertNotIn("fullscreen_state", commands)
+        self.assertEqual(commands.count("fullscreen_state"), 1, "only initial startup may clear fullscreen")
         self.assertNotIn("workspace", commands)
         self.assertLess(len(commands.splitlines()), 10, "event burst should be coalesced")
+        self.assertEqual(self.cli("open", "laptop")["pid"], pid)
+        self.stop_daemon()
+        connection.close()
+        self.start()
+        replacement, _ = server.accept()
+        self.addCleanup(replacement.close)
+        self.assertEqual(self.cli("open", "laptop")["pid"], pid)
+        self.assertEqual(calls.read_text().count("fullscreen_state"), 1,
+                         "reopen and daemon restart must preserve the user's fullscreen choice")
+        other_pid = self.connect("other")
+        startup = {**window, "address": "0x2", "pid": other_pid, "stableId": "124", "title": "Moonlight"}
+        clients.write_text(json.dumps([window, startup]))
+        replacement.sendall(b"openwindow>>0x2\n")
+        time.sleep(.2)
+        self.assertIsNone(self.cli("status", "other")["window"])
+        self.assertEqual(calls.read_text().count("fullscreen_state"), 1)
+        startup["title"] = "other - Moonlight"
+        clients.write_text(json.dumps([window, startup]))
+        replacement.sendall(b"windowtitle>>0x2\n")
+        self.wait(lambda: self.cli("status", "other")["phase"] == "window-ready")
+        self.assertEqual(self.cli("open", "other")["pid"], other_pid)
+        self.assertEqual(self.cli("status", "laptop")["pid"], pid)
+        self.assertEqual(calls.read_text().count("fullscreen_state"), 2,
+                         "only final owned windows receive startup policy")
 
     def test_restart_during_prepare_finishes_cancelled_recovery_without_launch(self):
         directory = self.session()

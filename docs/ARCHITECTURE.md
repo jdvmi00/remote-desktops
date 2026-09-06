@@ -45,11 +45,19 @@ Moonlight retains hardware decoding and its own rendering/frame pacing.
 ## Window behavior
 
 Moonlight launches in windowed mode. The controller never creates workspace
-rules, reserves tiles, changes geometry, or repairs a user's placement. Window
+rules, reserves tiles, sets window positions/sizes, or repairs a user's placement. Window
 creation, title, visibility, and movement are observed through Hyprland events;
 event bursts are coalesced before a snapshot query. Visibility can update idle
 inhibition on the owned window. Explicit focus/reconnect/disconnect can focus
 or close an owned window, but reconciliation never moves it.
+
+Each new matched stream window receives a stable per-computer tag and one
+fullscreen reset to counter Omarchy's startup rule. The reset is consumed
+durably before dispatch and is not replayed on repeated opens, workspace changes,
+or daemon restart. A crash between persistence and dispatch may leave the initial
+fullscreen state unchanged; this choice avoids unexpectedly undoing user intent
+after recovery. Existing windows from the earlier schema are adopted without
+resetting fullscreen. See [launcher identity](LAUNCHERS.md).
 
 The CLI also runs without a Hyprland observer. In that case it reports process
 state (`running`), with no window identity or focus control. `window-ready` is

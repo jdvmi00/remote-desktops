@@ -1,5 +1,6 @@
 mod desktop;
 mod host;
+mod launcher;
 mod server;
 mod storage;
 mod supervisor;
@@ -23,6 +24,17 @@ struct Cli {
 enum Action {
     /// Run the per-user controller; closing a CLI does not stop it.
     Daemon,
+    /// Open from an application launcher; wait for a window and report failures.
+    Open {
+        computer: String,
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Manage per-computer desktop launcher entries.
+    Launcher {
+        #[command(subcommand)]
+        action: launcher::Action,
+    },
     Connect {
         computer: String,
         #[arg(long)]
@@ -65,6 +77,7 @@ fn main() {
         libc::umask(0o077);
     }
     let cli = Cli::parse();
+    let notify = matches!(cli.command, Action::Open { .. });
     let result = if let Action::Supervise {
         directory,
         token,
@@ -82,6 +95,18 @@ fn main() {
     };
     if let Err(error) = result {
         eprintln!("remote-desktops: {error:#}");
+        if notify {
+            let _ = std::process::Command::new("notify-send")
+                .args([
+                    "--app-name=Remote Desktops",
+                    "--",
+                    "Remote Desktop could not open",
+                    &error.to_string(),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         std::process::exit(1);
     }
 }
@@ -90,6 +115,13 @@ async fn run(cli: Cli) -> Result<()> {
     if matches!(cli.command, Action::Daemon) {
         return server::serve(paths).await;
     }
+    if let Action::Launcher { action } = &cli.command {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&launcher::run(&paths, action).await?)?
+        );
+        return Ok(());
+    }
     if matches!(cli.command, Action::Computers) {
         let value = host::call(json!({"operation":"validate","config":paths.config})).await?;
         let entries=value.as_object().unwrap().iter().map(|(name,c)|json!({"computer":name,"profiles":c["profiles"].as_object().unwrap().keys().collect::<Vec<_>>()})).collect::<Vec<_>>();
@@ -97,7 +129,7 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
     let payload = match &cli.command {
-        Action::Connect { computer, profile } => {
+        Action::Connect { computer, profile } | Action::Open { computer, profile } => {
             json!({"command":"connect","computer":computer,"profile":profile})
         }
         Action::Disconnect { computer } => json!({"command":"disconnect","computer":computer}),
@@ -116,6 +148,7 @@ async fn run(cli: Cli) -> Result<()> {
     if matches!(
         cli.command,
         Action::Connect { .. }
+            | Action::Open { .. }
             | Action::Disconnect { .. }
             | Action::Restore { .. }
             | Action::Reconnect { .. }
@@ -157,7 +190,31 @@ async fn run(cli: Cli) -> Result<()> {
             );
         }
     }
-    let result = server::request(&paths, &payload).await?;
+    let mut result = server::request(&paths, &payload).await?;
+    if let Action::Open { computer, .. } = &cli.command {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            if result["phase"] == "window-ready" {
+                result = server::request(&paths, &json!({"command":"focus","computer":computer}))
+                    .await?;
+                break;
+            }
+            if result["desired"] != true {
+                bail!(
+                    "{}",
+                    result["error"]
+                        .as_str()
+                        .unwrap_or("connection ended before a window was ready")
+                );
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("connection is still pending; inspect remote-desktops status {computer}");
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            result =
+                server::request(&paths, &json!({"command":"status","computer":computer})).await?;
+        }
+    }
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else if let Some(records) = result["computers"].as_array() {

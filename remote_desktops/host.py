@@ -41,6 +41,7 @@ def configuration(path):
     value = load(path, {"version": 1, "computers": {}})
     require(value.get("version") == 1 and isinstance(value.get("computers"), dict), "unsupported computers.json schema")
     identities = set()
+    titles = set()
     for name, computer in value["computers"].items():
         require(NAME.fullmatch(name), "invalid computer ID")
         require(isinstance(computer.get("host"), str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:-]{0,252}", computer["host"]), "invalid host")
@@ -49,6 +50,9 @@ def configuration(path):
         require(identity not in identities, "two computers refer to the same pairing identity")
         identities.add(identity)
         require(isinstance(computer.get("title"), str) and 1 <= len(computer["title"]) <= 250, "title must be the final Moonlight window title")
+        require(not any(ord(c) < 32 for c in computer["title"]), "title must not contain control characters")
+        require(computer["title"] not in titles, "computer window titles must be unique for launcher matching")
+        titles.add(computer["title"])
         require(isinstance(computer.get("profiles"), dict) and computer["profiles"], "computer needs profiles")
         require(computer.get("platform", "unknown") in ("macos", "windows", "linux", "unknown"), "invalid host platform")
         require("default_profile" not in computer or computer["default_profile"] in computer["profiles"], "unknown default profile")

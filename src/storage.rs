@@ -84,6 +84,11 @@ pub fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
         .context("invalid state JSON")
 }
 pub fn write<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    write_bytes(path, &bytes)
+}
+pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("state file needs a parent")?;
     let tmp = parent.join(format!(".write-{}", uuid::Uuid::new_v4()));
     let result = (|| {
@@ -92,8 +97,7 @@ pub fn write<T: Serialize>(path: &Path, value: &T) -> Result<()> {
             .write(true)
             .mode(0o600)
             .open(&tmp)?;
-        serde_json::to_writer(&mut file, value)?;
-        file.write_all(b"\n")?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&tmp, path)?;
         File::open(parent)?.sync_all()?;
