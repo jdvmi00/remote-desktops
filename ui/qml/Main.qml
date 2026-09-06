@@ -419,7 +419,7 @@ ApplicationWindow {
                                 visible: !!root.selected
                                 Layout.fillWidth: true; Layout.topMargin: 8; spacing: 2
                                 ActionButton { quiet: true; icon.source: "qrc:/qml/icons/pencil.svg"; text: "Edit"; visible: !!root.selected && !root.selected.unconfigured; enabled: !manager.setupBusy; hint: "Change the name, address, or stream quality"; onClicked: setup.begin(root.selected.computer) }
-                                ActionButton { quiet: true; icon.source: "qrc:/qml/icons/grid.svg"; text: "Add to app launcher"; visible: !!root.selected && !root.selected.unconfigured; enabled: !!root.selected && !root.selected.busy; hint: "Install a desktop entry that opens this computer directly"; onClicked: manager.act(root.selected.computer, "launcher") }
+                                ActionButton { objectName: "launcherAction"; quiet: true; icon.source: "qrc:/qml/icons/grid.svg"; text: root.selected && root.selected.launcher_installed ? "Remove from app launcher" : "Add to app launcher"; visible: !!root.selected && !root.selected.unconfigured; enabled: !!root.selected && !root.selected.busy; hint: root.selected && root.selected.launcher_installed ? "Delete the desktop entry for this computer" : "Install a desktop entry that opens this computer directly"; onClicked: manager.act(root.selected.computer, root.selected.launcher_installed ? "launcher-remove" : "launcher") }
                                 ActionButton { quiet: true; icon.source: "qrc:/qml/icons/info.svg"; text: "Details"; hint: "Identity, state, and technical messages"; onClicked: details.open() }
                                 ActionButton { quiet: true; destructive: true; icon.source: "qrc:/qml/icons/trash.svg"; text: "Remove"; enabled: !!root.selected && !root.selected.busy && !root.selected.desired && !root.transitioning && !root.recovering; hint: "Remove this computer from Remote Desktops"; onClicked: root.removeSelected() }
                             }
@@ -487,7 +487,7 @@ ApplicationWindow {
             const r = [["Computer ID", s.computer], ["Profile", root.profile || "—"], ["State", root.label(root.phase) + (root.stale ? " (last known)" : "")],
                        ["Window", s.window ? "Detected (identity match)" : "Not detected"], ["Client", s.client_version && s.client_version !== "unknown" ? "Moonlight " + s.client_version : "—"]]
             if (s.pid) r.push(["Client process", String(s.pid)])
-            if (s.launcher && s.launcher.desktop_id) r.push(["Launcher entry", s.launcher.desktop_id])
+            r.push(["Launcher entry", s.launcher_installed ? "Installed" : "Not installed"])
             return r
         }
         readonly property string report: rows.map(r => r[0] + ": " + r[1]).join("\n") + "\n" + (root.selected ? root.selected.error || root.selected.recovery_error || "No errors reported." : "")

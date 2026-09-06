@@ -469,7 +469,12 @@ class SettingsTests(unittest.TestCase):
         bindir.mkdir()
         self.env["PATH"] = str(bindir) + os.pathsep + self.env["PATH"]
         moonlight = bindir / "moonlight"
-        moonlight.write_text("#!/bin/sh\ncase \"$1\" in --version) echo 'Moonlight v6.1.0';; list) echo \"${FAKE_APP-Desktop}\";; *) exit 99;; esac\n")
+        moonlight.write_text("#!/bin/sh\ncase \"$1\" in --version) echo 'Moonlight v6.1.0';; list) echo \"${FAKE_APP-Desktop}\";;\n"
+                             "pair) if [ \"$4\" = 0000 ]; then echo 'Failed to pair: incorrect PIN' >&2; exit 1; fi;\n"
+                             "  printf '2\\\\uuid=22222222-3333-4444-5555-666666666666\\n2\\\\hostname=Garage PC\\n2\\\\srvcert=y\\n2\\\\manualaddress=%s\\n' \"$2\" >> \"$XDG_CONFIG_HOME/Moonlight Game Streaming Project/Moonlight.conf\";;\n"
+                             "*) exit 99;; esac\n")
+        (bindir / "pgrep").write_text("#!/bin/sh\nexit 1\n")
+        (bindir / "pgrep").chmod(0o700)
         moonlight.chmod(0o700)
         self.uuid = "11111111-2222-3333-4444-555555555555"
         paired = self.root / "config/Moonlight Game Streaming Project/Moonlight.conf"
@@ -521,13 +526,19 @@ class SettingsTests(unittest.TestCase):
         session.write_text(json.dumps({"desired": True, "phase": "window-ready", "config": c}))
         snapshot = session.read_bytes()
         draft = self.cli("get", "home")
-        self.assertNotIn("ssh", draft)
-        self.assertNotIn("display", draft["profiles"]["desktop"])
-        draft.update(name="Renamed", stream_resolution="2560x1440", title="ignored", ssh={"user":"ignored"})
+        self.assertEqual(draft["ssh"], {"user": "synthetic"})
+        self.assertEqual(draft["display"], {"adapter": "macos"})
+        self.assertEqual(draft["profiles"]["desktop"]["display"], {"adapter": "macos"})
+        self.assertNotIn("hdr", draft["profiles"]["desktop"])
+        draft.update(name="Renamed", stream_resolution="2560x1440", title="ignored", pairing_uuid="ignored-too")
+        draft["ssh"] = {"user": "renamed-user", "control_path": "", "alias": ""}
+        self.assertIn("reopen it to edit", self.cli("save", draft=draft, ok=False))
+        del draft["pairing_uuid"]
         self.cli("save", draft=draft)
         after = json.loads(self.config.read_text())
         expected = value
         expected["computers"]["home"]["name"] = "Renamed"
+        expected["computers"]["home"]["ssh"] = {"user": "renamed-user"}
         expected["computers"]["home"]["profiles"]["desktop"]["stream_resolution"] = "2560x1440"
         self.assertEqual(after, expected)
         self.assertEqual(session.read_bytes(), snapshot)
@@ -578,6 +589,56 @@ class SettingsTests(unittest.TestCase):
         # Without a stale session record the same paired computer can be added again.
         self.cli("save", draft=self.draft())
         self.assertIn("home", json.loads(self.config.read_text())["computers"])
+
+    def test_discover_and_pair_use_local_tools_and_moonlight_only(self):
+        bindir = self.root / "bin"
+        (bindir / "tailscale").write_text("#!/bin/sh\ncat <<'EOF'\n" + json.dumps({"Peer": {"a": {
+            "HostName": "Garage PC", "DNSName": "garage.tail.ts.net.", "OS": "windows", "Online": True, "TailscaleIPs": ["100.9.9.9"]}}}) + "\nEOF\n")
+        (bindir / "tailscale").chmod(0o700)
+        (bindir / "avahi-browse").write_text("#!/bin/sh\nprintf '%s\\n' '=;e;IPv4;Home\\032PC;_nvstream._tcp;local;home-pc.local;192.168.1.2;47989;'\n")
+        (bindir / "avahi-browse").chmod(0o700)
+        found = self.cli("discover")
+        self.assertEqual([c["name"] for c in found["candidates"]], ["Garage PC", "Home PC"])
+        self.assertEqual(found["candidates"][1]["pairing_uuid"], self.uuid)
+        self.assertFalse(found["candidates"][1]["configured"])
+        self.cli("save", draft=self.draft())
+        self.assertTrue(self.cli("discover")["candidates"][1]["configured"])
+        self.assertIn("incorrect PIN", self.cli("pair", draft={"host": "garage.tail.ts.net", "pin": "0000"}, ok=False))
+        paired = self.cli("pair", draft={"host": "garage.tail.ts.net", "pin": "1234"})["paired"]
+        self.assertEqual(paired, {"paired": True, "pairing_uuid": "22222222-3333-4444-5555-666666666666", "name": "Garage PC", "host": "garage.tail.ts.net"})
+        self.assertTrue(any(c["pairing_uuid"] == paired["pairing_uuid"] for c in self.cli("catalog")["paired"]))
+        self.assertFalse((self.root / "state").exists())
+
+    def test_managed_display_settings_are_editable_and_inspectable(self):
+        draft = self.draft()
+        draft.update(platform="macos", ssh={"user": "streamer", "control_path": "/tmp/ctl"}, display={"adapter": "macos", "require_ac": True})
+        self.cli("save", draft=draft)
+        saved = json.loads(self.config.read_text())["computers"]["home"]
+        self.assertEqual(saved["ssh"], {"user": "streamer", "control_path": "/tmp/ctl"})
+        self.assertEqual(saved["profiles"]["desktop"]["display"], {"adapter": "macos", "require_ac": True})
+        edit = self.cli("get", "home")
+        edit["display"] = {"adapter": "external", "require_ac": True}
+        edit["ssh"] = {"user": "", "control_path": "", "alias": ""}
+        self.cli("save", draft=edit)
+        saved = json.loads(self.config.read_text())["computers"]["home"]
+        self.assertNotIn("ssh", saved)
+        self.assertEqual(saved["profiles"]["desktop"]["display"], {"adapter": "external"})
+        bad = self.cli("get", "home")
+        bad["display"] = {"adapter": "windows"}
+        self.assertIn("platform=windows", self.cli("save", draft=bad, ok=False))
+        self.assertIn("ssh-user-required", self.cli("inspect", draft={"computer": "home", "platform": "macos"}, ok=False))
+        # Windows inspection goes through SSH only; a fake ssh answers the staged script.
+        bindir = self.root / "bin"
+        (bindir / "ssh").write_text("#!/bin/sh\nscript=$(cat)\ncase \"$script\" in\n"
+            "*Install.ps1*) printf '%s' '{\"ok\":true,\"result\":{\"sunshine_output\":\"{ABCDEF01-1111-2222-3333-444444444444}\",\"helper\":{\"installed\":false},\"displays\":[{\"id\":\"\\\\\\\\?\\\\DISPLAY#MTT1337#1#{g}\",\"name\":\"Virtual\",\"active\":false,\"available\":true}]}}';;\n"
+            "*) printf '%s' '{\"ok\":true}';;\nesac\n")
+        (bindir / "ssh").chmod(0o700)
+        (bindir / "scp").write_text("#!/bin/sh\nexit 0\n")
+        (bindir / "scp").chmod(0o700)
+        observed = self.cli("inspect", draft={"computer": "home", "platform": "windows", "ssh": {"alias": "laptop"}})
+        self.assertEqual(observed["displays"][0]["hardware"], "MTT1337")
+        self.assertFalse(observed["helper"]["installed"])
+        self.assertIn("choose a paired computer", self.cli("inspect", draft={"computer": "nobody", "platform": "windows", "ssh": {"alias": "laptop"}}, ok=False))
 
     def test_removed_computer_session_cannot_gain_a_second_owner(self):
         draft = self.draft()

@@ -38,6 +38,14 @@ configuration rules and recovery behavior from the extracted host adapters.
 
 Never store passwords, private keys, or pairing certificates in this file.
 
+The graphical manager can set up the managed adapters. For a Mac it needs the
+approved SSH user and, for BetterDisplay, a display and mode read from the Mac
+over SSH. For Windows it needs an SSH alias that reaches an administrator
+account, a virtual display already captured by Sunshine (`output_name`), and
+the console helper, which it installs over that alias. These fields are the
+only SSH and display settings the manager edits; keys, known hosts, and
+certificates stay where they are.
+
 ## Commands
 
 ```sh
@@ -51,7 +59,26 @@ cargo build --locked --release
 ./target/release/remote-desktops restore macbook
 ./target/release/remote-desktops start
 ./target/release/remote-desktops settings remove macbook
+./target/release/remote-desktops settings discover
+echo '{"host":"garage.example.net","pin":"1234"}' | ./target/release/remote-desktops --json settings pair
 ```
+
+`settings discover` lists computers seen on Tailscale (`tailscale status`) and
+announcing Sunshine on the local network (`avahi-browse`), merged by name, with
+their platform, reachability, and whether Moonlight has already paired them.
+Both tools are optional; a missing or failing tool yields an empty list.
+
+`settings pair` runs Moonlight's own `moonlight pair HOST --pin PIN` and waits
+up to two minutes for the PIN to be entered in Sunshine's web interface on the
+host. Certificates and the client identity stay in Moonlight's configuration;
+the command reads the new host back from there. It refuses while the Moonlight
+window is open, because Moonlight rewrites that configuration on exit.
+
+`settings inspect` reads a host's displays over the approved SSH access for a
+JSON draft on stdin: on a Mac, every active display with its modes and power
+state; on Windows, the displays, Sunshine's `output_name`, and whether the
+console helper is installed. `settings install-helper` installs the Windows
+helper for a draft that names the capture display. Neither changes a display.
 
 `start` starts the daemon if it is not running and reports status without
 connecting anything. `settings remove` deletes a computer's configuration and

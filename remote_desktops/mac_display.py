@@ -90,11 +90,58 @@ def native_display():
             f'{values["PixelWidth"]}x{values["PixelHeight"]}')
 
 
+def list_displays():
+    """Read-only inventory for setup: every active display, its mode list, and power state."""
+    cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    u32, ptr = ctypes.c_uint32, ctypes.c_void_p
+    def bind(name, result, *args):
+        fn = getattr(cg, name)
+        fn.restype, fn.argtypes = result, list(args)
+        return fn
+    count, ids = u32(), (u32 * 16)()
+    bind("CGGetActiveDisplayList", ctypes.c_int32, u32, ctypes.POINTER(u32), ctypes.POINTER(u32))(16, ids, ctypes.byref(count))
+    main = bind("CGMainDisplayID", u32)()
+    better = os.path.exists(BETTER)
+    displays = []
+    for i in range(count.value):
+        did = ids[i]
+        built_in = bool(bind("CGDisplayIsBuiltin", u32, u32)(did))
+        entry = {"display_id": str(did), "main": did == main, "builtin": built_in, "uuid": None,
+                 "name": "Built-in Display" if built_in else "External Display", "modes": [], "current": None}
+        mode = bind("CGDisplayCopyDisplayMode", ptr, u32)(did)
+        if mode:
+            try:
+                width = bind("CGDisplayModeGetWidth", ctypes.c_size_t, ptr)(mode)
+                height = bind("CGDisplayModeGetHeight", ctypes.c_size_t, ptr)(mode)
+                pixels = bind("CGDisplayModeGetPixelWidth", ctypes.c_size_t, ptr)(mode)
+                refresh = bind("CGDisplayModeGetRefreshRate", ctypes.c_double, ptr)(mode)
+                entry["current"] = {"resolution": f"{width}x{height}", "hidpi": pixels > width, "refresh": refresh or "variable"}
+            finally:
+                bind("CGDisplayModeRelease", None, ptr)(mode)
+        if better:
+            try:
+                idents = json.loads(run([BETTER, "get", "-type=Display", "-displayID=" + str(did), "-identifiers"]))
+                if isinstance(idents, dict) and re.fullmatch(r"[A-Fa-f0-9-]{36}", idents.get("UUID", "")):
+                    entry["uuid"] = idents["UUID"]
+                    entry["name"] = idents.get("name") or entry["name"]
+                    for line in run([BETTER, "get", "-type=Display", "-UUID=" + idents["UUID"], "-displayModeList"]).splitlines():
+                        m = re.fullmatch(r"\d+ - (\d+x\d+)( HiDPI)? (\d+(?:\.\d+)?)Hz.*", line.strip())
+                        if m:
+                            entry["modes"].append({"resolution": m[1], "hidpi": bool(m[2]), "refresh": float(m[3])})
+            except ValueError:
+                pass
+        displays.append(entry)
+    power = run(["/usr/bin/pmset", "-g", "batt"])
+    return {"betterdisplay": better, "displays": displays, "ac_power": "AC Power" in power, "lid_closed": lid_closed()}
+
+
 def display(request):
     state = json.loads((Path.home() / ".config/sunshine/sunshine_state.json").read_text())
     identity = state.get("root", {}).get("uniqueid", "")
     if identity.lower() != request["pairing_uuid"].lower():
         raise ValueError("host-identity-mismatch: SSH host is not the paired Sunshine computer")
+    if request["operation"] == "list":
+        return list_displays()
     native = request.get("adapter") == "macos"
     if native:
         ids, native_mode, render_resolution = native_display()

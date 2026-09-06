@@ -38,7 +38,7 @@ set_tests_properties(qml-light PROPERTIES ENVIRONMENT "${TEST_ENVIRONMENT}")
 add_test(NAME qml-setup COMMAND remote-desktops-manager --demo --setup-preview computer --compact --smoke-test)
 set_tests_properties(qml-setup PROPERTIES ENVIRONMENT "${TEST_ENVIRONMENT}")
 
-foreach(page preferences advanced check)
+foreach(page pair preferences recovery windows advanced check)
     add_test(NAME qml-setup-${page} COMMAND remote-desktops-manager --demo --setup-preview ${page} --compact --smoke-test)
     set_tests_properties(qml-setup-${page} PROPERTIES ENVIRONMENT "${TEST_ENVIRONMENT}")
 endforeach()

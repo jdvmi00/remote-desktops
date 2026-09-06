@@ -24,7 +24,7 @@ int main(int argc, char **argv) {
     parser.addOption({"backend", "Absolute path to the Rust CLI.", "path"});
     parser.addOption({"smoke-test", "Render the demo and exit with failure on QML warnings."});
     parser.addOption({"screenshot", "Save an isolated demo rendering and exit.", "path"});
-    parser.addOption({"setup-preview", "Show guided setup (computer, preferences, advanced, check).", "page"});
+    parser.addOption({"setup-preview", "Show guided setup (computer, pair, preferences, recovery, windows, advanced, check).", "page"});
     parser.addOption({"compact", "Render the preview at the minimum supported size."});
     parser.addOption({"dialog", "Open a preview surface (help, details, remove, notice, error).", "name"});
     parser.addOption({"state", "Initial demo state (idle, connecting, preflight, running, attention, restore-pending, empty, unavailable, many, unconfigured).", "phase"});
@@ -73,9 +73,21 @@ int main(int argc, char **argv) {
         auto *setup = window->findChild<QObject *>("setupDialog");
         QMetaObject::invokeMethod(setup, "begin", Q_ARG(QVariant, QVariant("")));
         const auto page = parser.value("setup-preview");
-        if (page != "computer") QTimer::singleShot(450, setup, [setup, page] {
+        // The demo catalog and discovery take about 600 ms; act once they are done.
+        if (page != "computer") QTimer::singleShot(900, setup, [setup, page] {
+            if (page == "pair") {
+                QVariantMap target{{"name", "Garage PC"}, {"host", "garage.tail-example.ts.net"}, {"platform", "windows"}};
+                QMetaObject::invokeMethod(setup, "startPair", Q_ARG(QVariant, QVariant(target)), Q_ARG(QVariant, QVariant("")));
+                return;
+            }
             QVariantMap host{{"name", "Home workstation"}, {"host", "home.example.net"}, {"pairing_uuid", "11111111-2222-3333-4444-555555555555"}};
-            QMetaObject::invokeMethod(setup, "choose", Q_ARG(QVariant, QVariant(host)));
+            const QString platform = page == "recovery" ? "macos" : page == "windows" ? "windows" : "unknown";
+            QMetaObject::invokeMethod(setup, "choose", Q_ARG(QVariant, QVariant(host)), Q_ARG(QVariant, QVariant(platform)));
+            if (page == "recovery" || page == "windows") {
+                QMetaObject::invokeMethod(setup, "setAdapter", Q_ARG(QVariant, QVariant(page == "recovery" ? "betterdisplay" : "windows")));
+                QMetaObject::invokeMethod(setup, "setNested", Q_ARG(QVariant, QVariant("ssh")), Q_ARG(QVariant, QVariant(page == "recovery" ? "user" : "alias")), Q_ARG(QVariant, QVariant(page == "recovery" ? "streamer" : "garage")));
+                QMetaObject::invokeMethod(setup, "inspectHost");
+            }
             if (page == "advanced") setup->setProperty("advanced", true);
             if (page == "check") QMetaObject::invokeMethod(setup, "advance");
         });
@@ -83,7 +95,7 @@ int main(int argc, char **argv) {
     if (parser.isSet("compact")) { window->setProperty("width", 880); window->setProperty("height", 600); }
     if (parser.isSet("dialog")) QTimer::singleShot(300, window, [window, name = parser.value("dialog")] { QMetaObject::invokeMethod(window, "preview", Q_ARG(QVariant, QVariant(name))); });
     if (parser.isSet("smoke-test") || parser.isSet("screenshot")) {
-        QTimer::singleShot(2200, &app, [&] {
+        QTimer::singleShot(2600, &app, [&] {
             if (parser.isSet("screenshot")) {
                 auto *quick = qobject_cast<QQuickWindow *>(window);
                 if (!quick || !quick->grabWindow().save(parser.value("screenshot"))) warnings = true;

@@ -66,8 +66,9 @@ private slots:
         QVERIFY(dialog);
         QVERIFY(QMetaObject::invokeMethod(dialog, "begin", Q_ARG(QVariant, QVariant(""))));
         QTRY_VERIFY(dialog->property("loaded").toBool());
+        QTRY_VERIFY(!dialog->property("discovering").toBool());
         QVariantMap host{{"name", "Home workstation"}, {"host", "home.example.net"}, {"pairing_uuid", "11111111-2222-3333-4444-555555555555"}};
-        QVERIFY(QMetaObject::invokeMethod(dialog, "choose", Q_ARG(QVariant, QVariant(host))));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "choose", Q_ARG(QVariant, QVariant(host)), Q_ARG(QVariant, QVariant(""))));
         auto *next = dialog->findChild<QObject *>("setupNext");
         auto *test = dialog->findChild<QObject *>("setupTest");
         QVERIFY(next && test);
@@ -241,6 +242,78 @@ fi
         QFile input(binary + ".input"); QVERIFY(input.open(QIODevice::ReadOnly));
         QCOMPARE(QJsonDocument::fromJson(input.readAll()).object().toVariantMap(), draft);
         QVERIFY(m.computers().isEmpty());
+    }
+    void pairingDiscoveryAndRecoveryFlowsInDemo() {
+        Manager m("/must-not-run", "/must-not-connect", true);
+        Theme theme("/missing/palette");
+        QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.rootContext()->setContextProperty("manager", &m);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        auto *dialog = window->findChild<QObject *>("setupDialog");
+        QVERIFY(QMetaObject::invokeMethod(dialog, "begin", Q_ARG(QVariant, QVariant(""))));
+        QTRY_VERIFY(dialog->property("loaded").toBool());
+        QTRY_VERIFY(!dialog->property("discovering").toBool()); // Discovery follows the catalog on its own.
+        QCOMPARE(dialog->property("discovered").toList().size(), 3);
+        QVariantMap target{{"name", "Garage PC"}, {"host", "garage.tail-example.ts.net"}, {"platform", "windows"}};
+        QVERIFY(QMetaObject::invokeMethod(dialog, "startPair", Q_ARG(QVariant, QVariant(target)), Q_ARG(QVariant, QVariant(""))));
+        QVERIFY(dialog->property("pairing").toBool());
+        QCOMPARE(dialog->property("pin").toString().size(), 4);
+        QVERIFY(m.setupBusy());
+        QTRY_COMPARE_WITH_TIMEOUT(dialog->property("step").toInt(), 1, 8000); // A successful pairing continues to settings.
+        QVERIFY(!dialog->property("pairing").toBool());
+        auto draft = dialog->property("draft").toMap();
+        QCOMPARE(draft["pairing_uuid"].toString(), QString("22222222-3333-4444-5555-666666666666"));
+        QCOMPARE(draft["platform"].toString(), QString("windows"));
+        QCOMPARE(draft["display"].toMap()["adapter"].toString(), QString("external"));
+        // Managed Windows recovery: alias, inspection, capture display, helper install.
+        QVERIFY(QMetaObject::invokeMethod(dialog, "setAdapter", Q_ARG(QVariant, QVariant("windows"))));
+        auto *next = dialog->findChild<QObject *>("setupNext");
+        QVERIFY(QMetaObject::invokeMethod(next, "clicked"));
+        QCOMPARE(dialog->property("step").toInt(), 1); // Alias and capture display are required first.
+        QVERIFY(dialog->property("attempted").toBool());
+        QVERIFY(QMetaObject::invokeMethod(dialog, "setNested", Q_ARG(QVariant, QVariant("ssh")), Q_ARG(QVariant, QVariant("alias")), Q_ARG(QVariant, QVariant("garage"))));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "inspectHost"));
+        QTRY_VERIFY(dialog->property("inspection").toMap().contains("displays"));
+        QVERIFY(!dialog->property("inspection").toMap()["helper"].toMap()["installed"].toBool());
+        const auto device = dialog->property("inspection").toMap()["displays"].toList().first().toMap()["id"].toString();
+        QVERIFY(QMetaObject::invokeMethod(dialog, "setNested", Q_ARG(QVariant, QVariant("display")), Q_ARG(QVariant, QVariant("device_id")), Q_ARG(QVariant, QVariant(device))));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "installHelper"));
+        QTRY_VERIFY(dialog->property("inspection").toMap()["helper"].toMap()["installed"].toBool());
+        QVERIFY(dialog->property("valid").toBool());
+        QVERIFY(QMetaObject::invokeMethod(next, "clicked"));
+        QCOMPARE(dialog->property("step").toInt(), 2);
+        QTRY_VERIFY(dialog->property("tested").toBool());
+        QVERIFY(QMetaObject::invokeMethod(next, "clicked"));
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QCOMPARE(m.computers().size(), 4);
+        // A wrong PIN is reported on the pairing page and offers a retry.
+        QVERIFY(QMetaObject::invokeMethod(dialog, "begin", Q_ARG(QVariant, QVariant(""))));
+        QTRY_VERIFY(dialog->property("loaded").toBool());
+        QTRY_VERIFY(!dialog->property("discovering").toBool());
+        QVERIFY(QMetaObject::invokeMethod(dialog, "startPair", Q_ARG(QVariant, QVariant(target)), Q_ARG(QVariant, QVariant("0000")))); // The demo rejects 0000.
+        QTRY_VERIFY_WITH_TIMEOUT(!m.setupBusy(), 8000);
+        QVERIFY(dialog->property("pairing").toBool());
+        QVERIFY(dialog->property("error").toString().contains("incorrect PIN"));
+        QCOMPARE(dialog->property("errorAction").toString(), QString("pair"));
+        QCOMPARE(warnings.count(), 0);
+        window->close();
+    }
+    void launcherRemovalUsesTheLauncherCommand() {
+        QTemporaryDir temp;
+        QString binary = temp.path() + "/fake backend";
+        QFile script(binary); QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write("#!/bin/sh\nif [ \"$2\" = computers ]; then printf '[{\"computer\":\"test\",\"name\":\"Test\",\"profiles\":[\"desktop\"]}]\\n'; else printf '%s\\n' \"$@\" > \"${0}.args\"; printf '{}\\n'; fi\n");
+        script.close(); script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        Manager m(binary, temp.path() + "/missing.socket");
+        QTRY_VERIFY(!m.loading());
+        QVERIFY(!m.computers()[0].toMap()["launcher_installed"].toBool());
+        m.act("test", "launcher-remove");
+        QTRY_VERIFY(m.notice().contains("removed from your app launcher"));
+        QFile args(binary + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
+        QCOMPARE(args.readAll(), QByteArray("--json\nlauncher\nremove\ntest\n"));
     }
     void removeUsesSettingsCommandAndForgetsLocally() {
         QTemporaryDir temp;

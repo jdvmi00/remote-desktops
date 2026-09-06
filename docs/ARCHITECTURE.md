@@ -140,9 +140,15 @@ and performs the existing authenticated app-list probe with an external display
 adapter. No setup operation prepares a host, writes recovery, starts the daemon,
 or launches a streaming client. Certificates and SSH details are not sent to Qt.
 
-A save merges only explicitly editable fields into the latest configuration.
-Existing computer IDs, pairing identities and window titles cannot be edited;
-other profiles and advanced display/SSH fields survive unchanged. Removed
+A save merges only explicitly editable fields into the latest configuration:
+name, address, platform, the default profile's stream settings and display
+recovery block, and the SSH user, control socket, and alias. Existing computer
+IDs, pairing identities and window titles cannot be edited; other profiles and
+remaining fields survive unchanged. Discovery shells out to `tailscale` and
+`avahi-browse` when present; pairing shells out to Moonlight's own `pair`
+command and reads the result back from Moonlight's configuration, so no
+pairing material passes through this application. Host inspection and the
+Windows helper installation reuse the same SSH transport as recovery. Removed
 computers with saved sessions cannot be re-added through the wizard under a
 second recovery identity. Existing sessions retain their immutable config and
 profile snapshots, including during reconnect and recovery. Atomic config
