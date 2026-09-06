@@ -5,6 +5,12 @@ Qt, and a graphical user session to show remote windows. Hyprland window control
 uses its current Lua dispatch and stable window IDs, without any Hypertile Lua
 module. The Rust toolchain is pinned in `rust-toolchain.toml`.
 
+Omarchy currently ships a Moonlight window rule that requests fullscreen, even
+when the client is launched with `--display-mode windowed`. Use Super+F to leave
+fullscreen when testing ordinary window movement. The backend does not override
+desktop window rules. Per-app launcher/packaging integration must address this
+default without repeatedly undoing the user's later fullscreen choices.
+
 ## Configuration
 
 Create `~/.config/remote-desktops/computers.json` using
@@ -84,5 +90,6 @@ from its checkout so it can find the Python helper package. A future package
 can supply the helper root using `REMOTE_DESKTOPS_HELPERS`; this is a local
 development/package setting, not a remote host option.
 
-No application has been installed and no host has been changed by the automated
-tests. Real Mac/Windows streaming validation is a separate step after handoff.
+Automated tests do not install the application or change hosts. Separately
+authorized live MacBook validation is recorded in [validation](VALIDATION.md);
+real Windows streaming remains untested by this application.
