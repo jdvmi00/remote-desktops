@@ -11,10 +11,16 @@ release metadata, tags, or GitHub settings.
   `develop`. Ordinary development requests do not authorize promotion to `main`.
 - Inspect git status before editing and preserve unrelated work. Stage only
   your changes; never discard or commit unrelated user changes.
-- Never force-push `main` or `develop`, delete either branch, move published
-  release tags, change the default branch, or bypass CI as a routine fix.
-- Unlocking or moving `main` requires an explicit release instruction from the
-  owner. Keep it locked throughout ordinary development and review.
+- Use rebase merging for all PRs. Do not create merge commits or squash commits;
+  rebase feature branches onto the current target branch when updating them.
+- History rewriting is allowed for rebase and history cleanup. Fetch first,
+  inspect the affected commits, and push with
+  `--force-with-lease` bound to the expected remote SHA, never plain `--force`.
+  Preserve unrelated work and rerun required checks on rewritten revisions.
+- Never delete `main` or `develop`, move published release tags, change the
+  default branch, or bypass CI as a routine fix.
+- Unlocking or moving `main` requires an explicit release or history-repair
+  instruction from the owner. Relock it immediately after the authorized work.
 
 ## CI and delivery
 
@@ -25,6 +31,8 @@ release metadata, tags, or GitHub settings.
 - Before merging, both GitHub checks `test` and `windows-check` must pass on the
   current PR revision, with the branch up to date and conversations resolved.
   No additional reviewer is required for this solo-maintainer repository.
+- Rebase merge with the checked head SHA. For an authorized integration-branch
+  rewrite, follow the lease and protection-restoration steps in RELEASING.md.
 - Fix failures without weakening, skipping, or renaming required checks to
   evade protection. Read-only job permissions are the default.
 - The bootstrap checks validate repository content and the validation tools on

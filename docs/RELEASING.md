@@ -5,11 +5,10 @@
 This repository contains project scaffolding. It has no standalone application,
 package, release version, or Omarchy marketplace submission yet.
 
-The initial CI/workflow setup is a one-time bootstrap: merge the setup PR into
-`develop` after both checks pass, then merge a bootstrap PR from `develop` into
-`main` after both checks pass. Lock `main` immediately afterwards. This is not
-an application release and creates no release tag. Future promotion requires
-an explicit release instruction from the owner.
+The initial CI/workflow bootstrap is complete. Its history was subsequently
+linearized at the owner's request. This is not an application release and
+creates no release tag. Future promotion requires an explicit release
+instruction; repairing existing history is governed separately below.
 
 ## Development
 
@@ -20,14 +19,38 @@ an explicit release instruction from the owner.
    `python3 -m unittest discover -s tests -v`.
 3. Push the feature branch and open a PR targeting `develop`.
 4. Wait for `test` and `windows-check` on the current PR revision. Resolve
-   conversations and update from the base branch when GitHub requires it.
-5. Merge through the PR without admin bypass. Keep working from `develop`.
+   conversations and rebase onto the base branch when GitHub requires it.
+5. Rebase merge through the PR using its checked head SHA, without admin bypass.
+   Do not use merge commits or squash merging. Keep working from `develop`.
 
 Both integration branches require up-to-date checks, PRs, resolved
-conversations, and administrator enforcement. They prohibit force pushes and
-deletion. This is a solo-maintainer workflow: zero additional approvals are
+conversations, administrator enforcement, and linear history. Force pushes are
+enabled for history rewriting; branch deletion remains prohibited. This is a
+solo-maintainer workflow: zero additional approvals are
 required. `main` has an additional lock between releases and remains the default.
 Tags matching `v*` cannot be updated or deleted, including by administrators.
+
+## History rewriting
+
+History may be rewritten for rebasing and cleanup; do not rewrite unrelated
+work or published version tags. An explicit owner instruction is required to
+unlock or rewrite `main` outside a release.
+
+1. Fetch current refs, inspect local status and the affected history, and record
+   the expected full remote SHA. Do not create backup bundles unless requested.
+2. Prepare linear replacement commits and verify the intended tree changes.
+   Run local checks and obtain passing GitHub checks for the replacement SHA
+   before updating an integration branch.
+3. Use `--force-with-lease=refs/heads/BRANCH:EXPECTED_SHA`, never plain force.
+   If the lease fails, stop and reconcile new remote work; do not replace the
+   expected SHA blindly.
+4. Required checks and linear history remain enforced. If GitHub's PR rule
+   blocks an explicitly authorized ref repair, temporarily lift only that PR
+   requirement on the affected branch for the repair, then restore it in a
+   `finally` block. Do not use this exception for ordinary feature delivery.
+   Unlock `main` only for the authorized operation and relock it immediately.
+5. Read back the branch SHA and protections, verify push CI on the resulting
+   revision, and update the local checkout without discarding uncommitted work.
 
 ## What CI proves today
 
@@ -52,14 +75,14 @@ real packaging; there are currently no installable artifacts to publish.
 1. Obtain an explicit release instruction. Prepare the version, changelog,
    package contents, dependency declarations, installation/migration/removal
    instructions, and recovery validation on a feature branch from `develop`.
-2. Pass relevant local suites and GitHub checks. Merge into `develop`, then open
+2. Pass relevant local suites and GitHub checks. Rebase merge into `develop`, then open
    a release PR from `develop` into `main`. Do not include unfinished features.
 3. Wait for all required checks on the release PR's current revision. Leave
    `main` locked during preparation and review.
 4. For the authorized promotion only, unlock `main` while retaining required
-   PRs, checks, and administrator enforcement. Merge the release PR once and
+   PRs, checks, and administrator enforcement. Rebase merge the release PR once and
    immediately lock `main` again. If promotion fails, restore the lock before
-   other work. Read back the protection settings and record the full merge SHA.
+   other work. Read back the protection settings and record the resulting full SHA.
 5. Verify the push checks on that exact `main` SHA. Create a new version tag
    pointing to it and publish the reviewed artifacts and release notes. Never
    move an existing release tag.

@@ -33,7 +33,7 @@ migration requirements, and acceptance criteria.
 
 ## Development
 
-Use a feature branch from `develop` and open a PR back to `develop`. `main`
+Use a feature branch from `develop` and rebase merge its PR into `develop`. `main`
 remains locked between authorized releases. See [AGENTS.md](AGENTS.md) and
 [the development and release workflow](docs/RELEASING.md).
 
