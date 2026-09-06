@@ -4,9 +4,9 @@
 
 The local daemon, CLI, and client supervisor use Rust with Tokio. Moonlight Qt
 remains a separate client process; Sunshine remains the remote server. The
-planned graphical manager uses Qt 6/QML in a separate process, communicating
-over the daemon's Unix socket. The backend has no Qt dependency. No GUI or Qt
-bridge is implemented in this feature.
+graphical manager uses Qt 6/QML with a small C++ Qt bridge in a separate process.
+It reads status over the daemon's Unix socket and submits explicit actions via
+the Rust CLI. The backend has no Qt dependency. See [desktop manager](UI.md).
 
 The existing Python macOS adapter and Windows transport/recovery algorithms are
 kept behind a one-operation helper interface. Windows retains its PowerShell
@@ -99,4 +99,21 @@ require the local Hypertile plugin. Do not install a second console helper or
 discard an existing journal during migration.
 
 Scenes and layout browsing remain in Hypertile. Generic application launch and
-window matching in Scenes are a subsequent feature.
+window matching in Scenes now use the installed per-computer desktop entries.
+
+## Manager process boundary
+
+The Qt bridge has no streaming, supervision, configuration-writing, or recovery
+implementation. Configuration listing runs the Rust CLI once at startup and on
+explicit refresh, exposing only computer ID/name, host, platform, default
+profile, and profile names. Pairing material is not part of this listing.
+Commands use an absolute executable and an argv array, never a shell string.
+
+Status uses asynchronous QLocalSocket request/reply framing, a 1.5-second
+request timeout, a 2 MB reply limit, and at most one outstanding request. The
+visible active manager polls every two seconds; an inactive manager stops
+polling. Unchanged status does not emit a model update. Command processes have
+a 60-second acknowledgement bound, with uncertainty reported if it expires;
+only the CLI process is stopped, not the independent daemon or its host work.
+No synchronous process/socket wait occurs on the GUI thread. These are resource
+bounds, not measured latency or CPU claims.

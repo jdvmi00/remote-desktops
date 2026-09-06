@@ -276,6 +276,15 @@ class BackendTests(unittest.TestCase):
         sock.sendall(b"x" * 65_537)
         self.assertEqual(self.cli("status")["computers"], [])
 
+    def test_manager_catalog_exposes_labels_without_pairing_material(self):
+        entries = self.cli("computers")
+        self.assertEqual([c["computer"] for c in entries], ["laptop", "other"])
+        self.assertEqual(entries[0]["name"], "laptop")
+        self.assertEqual(entries[0]["profiles"], ["desktop"])
+        self.assertEqual(set(entries[0]), {"computer", "name", "host", "platform", "default_profile", "profiles"})
+        self.assertNotIn("pairing_uuid", json.dumps(entries))
+        self.assertEqual(self.cli("status")["computers"], [])
+
     def test_launcher_install_metadata_and_removal_preserve_other_apps(self):
         installed = self.cli("launcher", "install", "laptop")
         path = Path(installed["installed"])

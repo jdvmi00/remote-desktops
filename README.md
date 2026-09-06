@@ -10,7 +10,8 @@ Hypertile Scene like any other application.
 
 The standalone backend is implemented on `develop`: a Rust daemon and CLI with
 Moonlight process supervision, journaled host recovery, and per-computer desktop
-launcher entries. The graphical manager and installable packaging are not implemented yet.
+launcher entries. The Qt graphical manager now provides connection controls for
+configured computers. Installable packaging is not implemented yet.
 `main` remains the locked project bootstrap; there is no published app release.
 
 The host adapters come from the remote-stream work in
@@ -27,8 +28,8 @@ profiles, connection lifecycle, host display recovery, and user controls.
 - Preserve Moonlight pairing and existing host authentication.
 - Offer a standalone computer/settings window and, optionally, an Omarchy bar plugin.
 
-Hypertile integration will use generic application launch and window matching.
-Hypertile will own placement; Remote Desktops will own connections.
+Hypertile Scenes uses generic application launch and window matching.
+Hypertile owns placement; Remote Desktops owns connections.
 
 See [the extraction plan](docs/EXTRACTION.md) for the implementation sequence,
 migration requirements, and acceptance criteria.
@@ -80,3 +81,13 @@ Initial local measurements and their limits are in [validation](docs/VALIDATION.
 
 MIT. This project is independently maintained and is not an official Omarchy,
 Moonlight, or Sunshine application.
+
+## Graphical manager
+
+A separate Qt 6/QML manager is available on `develop` for existing configured
+computers. It provides connection controls, profile selection, display recovery,
+and per-computer launchers. Closing it leaves connections running.
+
+See [UI build, preview, and interaction guide](docs/UI.md). Pairing and computer
+configuration still use Moonlight and the backend setup guide; no installable
+release has been published.

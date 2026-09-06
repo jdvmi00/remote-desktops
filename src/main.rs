@@ -124,7 +124,17 @@ async fn run(cli: Cli) -> Result<()> {
     }
     if matches!(cli.command, Action::Computers) {
         let value = host::call(json!({"operation":"validate","config":paths.config})).await?;
-        let entries=value.as_object().unwrap().iter().map(|(name,c)|json!({"computer":name,"profiles":c["profiles"].as_object().unwrap().keys().collect::<Vec<_>>()})).collect::<Vec<_>>();
+        let entries = value
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(name, c)| {
+                let title = c["title"].as_str().unwrap_or(name);
+                json!({"computer":name, "name":title.strip_suffix(" - Moonlight").unwrap_or(title),
+                "host":c["host"], "platform":c["platform"], "default_profile":c["default_profile"],
+                "profiles":c["profiles"].as_object().unwrap().keys().collect::<Vec<_>>()})
+            })
+            .collect::<Vec<_>>();
         println!("{}", serde_json::to_string_pretty(&entries)?);
         return Ok(());
     }
