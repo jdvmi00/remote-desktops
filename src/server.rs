@@ -86,6 +86,9 @@ impl Session {
 }
 pub struct Manager {
     pub paths: Paths,
+    // Resolved once at startup: a rebuilt binary leaves /proc/self/exe
+    // pointing at a deleted file, which would make every launch fail.
+    executable: std::path::PathBuf,
     sessions: Mutex<BTreeMap<String, Session>>,
     wakes: Mutex<BTreeMap<String, watch::Sender<u64>>>,
     windows: watch::Receiver<Vec<Window>>,
@@ -352,7 +355,8 @@ impl Manager {
             let delay = match result {
                 Ok(delay) => delay,
                 Err(error) => {
-                    let message = error.to_string();
+                    // Keep the cause chain: "launch supervisor" alone hides the reason.
+                    let message = format!("{error:#}");
                     let _ = self.update(&name, |r| {
                         if message.contains("host-unreachable")
                             && r.desired
@@ -505,7 +509,7 @@ impl Manager {
                 r.launched_at = now();
                 r.error = None;
             })?;
-            let mut command = Command::new(std::env::current_exe()?);
+            let mut command = Command::new(&self.executable);
             command
                 .args(["supervise", "--directory"])
                 .arg(&directory)
@@ -689,6 +693,7 @@ pub async fn serve(paths: Paths) -> Result<()> {
     }
     let manager = Arc::new(Manager {
         paths: paths.clone(),
+        executable: std::env::current_exe()?,
         sessions: Mutex::new(sessions),
         wakes: Mutex::new(BTreeMap::new()),
         windows: desktop::observe().await?,
