@@ -31,6 +31,23 @@ Hypertile will own placement; Remote Desktops will own connections.
 See [the extraction plan](docs/EXTRACTION.md) for the implementation sequence,
 migration requirements, and acceptance criteria.
 
+## Development
+
+Use a feature branch from `develop` and open a PR back to `develop`. `main`
+remains locked between authorized releases. See [AGENTS.md](AGENTS.md) and
+[the development and release workflow](docs/RELEASING.md).
+
+Run the bootstrap checks locally:
+
+```sh
+python3 scripts/check.py
+python3 -m unittest discover -s tests -v
+```
+
+GitHub Actions runs these checks on Linux and Windows for every PR and pushes
+to `develop` and `main`. Application and host recovery suites will be added
+with the implementation; the current checks validate repository content only.
+
 ## License
 
 MIT. This project is independently maintained and is not an official Omarchy,
