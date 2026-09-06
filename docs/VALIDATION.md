@@ -45,3 +45,43 @@ latency was exercised. Measure active-session memory/CPU, compositor activity,
 host health checks, startup/reconnect time, and Moonlight video statistics during
 the separately planned live handoff. GUI overhead remains unmeasured because
 the Qt manager is a subsequent feature.
+
+## Live MacBook validation
+
+On 2026-09-05, the owner authorized a temporary handoff from the idle Hypertile
+stream controller. The original configuration remained intact. Only the MacBook
+profile was copied into the local app configuration; no private profile,
+pairing material, runtime state, or screenshot was added to this repository.
+
+Environment: Hyprland 0.56.2, Moonlight Qt 6.1.0, the native `macos` display
+adapter, and a MacBook with its lid closed. Results:
+
+- Moonlight authenticated the paired host and opened Desktop. Negotiated video
+  was 2560x1440 at 60 fps, and the Mac desktop was visually observed.
+- Restarting the daemon preserved and adopted the same live Moonlight process.
+- The live focus check found a JSON/Lua window identity mismatch. Hyprland JSON
+  supplies hexadecimal stable IDs; its Lua API uses numeric IDs. The backend now
+  converts the ID before checking ownership. A regression test covers this
+  representation difference, and focus succeeded against the real window.
+- After leaving Omarchy's default Moonlight fullscreen mode, the window moved
+  from workspace 1 to an empty workspace 3. It stayed there for twelve seconds
+  with the same client PID and session generation. Floating resize to 1600x900
+  preserved the client and negotiated video resolution; the window was then
+  returned to its original workspace.
+- Explicit reconnect reached a new matched window in approximately 12.64
+  seconds in one observation. It preserved the recovery journal, and opening
+  the target again reused that client. Exactly one matching window remained.
+- Both a clean client close and explicit disconnect completed recovery. Remote
+  readback matched the original Sunshine output selection and unchanged
+  1920x1080, 60 Hz display mode. This adapter preserves display mode; this does
+  not test changing and restoring a BetterDisplay-managed mode.
+- The final session was idle with an empty recovery journal. The standalone
+  daemon was stopped and the original Hypertile controller restarted, with no
+  remote windows remaining.
+
+The desktop's default fullscreen rule remains a launcher/packaging integration
+item. Keyboard/mouse usability, audio, sustained frame delivery, and end-to-end
+latency were not independently verified. Windows live streaming and recovery
+still require separate host validation. These observations supplement the
+isolated regression suite; they do not turn mock performance samples into
+streaming performance measurements.

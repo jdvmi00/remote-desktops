@@ -139,6 +139,11 @@ fn lua_string(value: &str) -> String {
             .collect::<String>()
     )
 }
+fn lua_window_id(value: &str) -> Result<u64> {
+    // Hyprland's clients JSON uses hexadecimal text (e.g. "180000e1"),
+    // while hl.get_windows() exposes the same stable_id as a Lua number.
+    u64::from_str_radix(value, 16).context("invalid Hyprland stable window ID")
+}
 pub async fn action(window: &Window, action: &str) -> Result<()> {
     let dispatch = match action {
         "focus" => "hl.dsp.focus({window='address:'..w.address})",
@@ -154,10 +159,10 @@ pub async fn action(window: &Window, action: &str) -> Result<()> {
     // Revalidate all identity fields inside the compositor, atomically with
     // the dispatch. Never act on a recycled address based on a cached snapshot.
     let code = format!(
-        "for _,w in ipairs(hl.get_windows()) do if w.address=={} and w.pid=={} and tostring(w.stable_id)=={} and w.class=={} and w.title=={} then local r=hl.dispatch({dispatch}); if type(r)=='table' and r.error then error(r.error) end; return true end end; error('remote window identity changed')",
+        "for _,w in ipairs(hl.get_windows()) do if w.address=={} and w.pid=={} and w.stable_id=={} and w.class=={} and w.title=={} then local r=hl.dispatch({dispatch}); if type(r)=='table' and r.error then error(r.error) end; return true end end; error('remote window identity changed')",
         lua_string(&window.address),
         window.pid,
-        lua_string(&window.stable_id),
+        lua_window_id(&window.stable_id)?,
         lua_string(&window.class),
         lua_string(&window.title)
     );
@@ -182,5 +187,12 @@ mod tests {
     #[test]
     fn lua_strings_never_interpolate_code() {
         assert_eq!(lua_string("'\n"), "\"\\039\\010\"");
+    }
+    #[test]
+    fn compositor_json_ids_match_lua_numeric_ids() {
+        assert_eq!(lua_window_id("180000e1").unwrap(), 402653409);
+        assert_eq!(lua_window_id("123").unwrap(), 291);
+        assert!(lua_window_id("not-an-id").is_err());
+        assert!(lua_window_id("1; error('injected')").is_err());
     }
 }
