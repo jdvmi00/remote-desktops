@@ -23,6 +23,8 @@ from pathlib import Path
 request=json.load(sys.stdin)
 if request['operation']=='validate':
     result=json.loads(Path(request['config']).read_text())['computers']
+elif request['operation']=='validate-value':
+    result=request['value']['computers']
 else:
     path=Path(request['path'])
     with path.with_suffix('.lock').open('a') as lock:
@@ -377,6 +379,59 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(calls.read_text().count("fullscreen_state"), 2,
                          "only final owned windows receive startup policy")
 
+    def daemons(self):
+        # Detached daemons started by the CLI are found through their private HOME.
+        found = []
+        for entry in Path("/proc").iterdir():
+            try:
+                argv = entry.joinpath("cmdline").read_bytes().split(b"\0")
+                environ = entry.joinpath("environ").read_bytes().split(b"\0")
+            except (OSError, ValueError):
+                continue
+            if argv[:2] == [str(BIN).encode(), b"daemon"] and ("HOME=" + str(self.root)).encode() in environ:
+                found.append(int(entry.name))
+        return found
+
+    def test_start_launches_the_service_without_connecting(self):
+        self.stop_daemon()
+        try:
+            self.assertEqual(self.cli("start")["computers"], [])
+            self.assertTrue((self.root / "runtime/remote-desktops/control.sock").exists())
+            self.assertFalse(self.session().exists())
+            self.assertEqual(self.cli("start")["computers"], [])
+            self.assertEqual(len(self.daemons()), 1)
+        finally:
+            for pid in self.daemons():
+                os.kill(pid, signal.SIGTERM)
+            self.wait(lambda: not self.daemons())
+
+    def test_remove_forgets_only_settled_sessions_and_updates_settings(self):
+        config = self.root / "config/remote-desktops/computers.json"
+        self.connect()
+        refused = self.cli("settings", "remove", "laptop", check=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("Disconnect", refused.stderr)
+        self.assertIn("laptop", json.loads(config.read_text())["computers"])
+        (self.session() / "conflict").touch()
+        self.cli("disconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "restore-pending")
+        self.assertIn("restore", self.cli("settings", "remove", "laptop", check=False).stderr)
+        self.assertTrue(self.session().exists())
+        self.cli("release", "laptop", "--keep-host-settings")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "idle")
+        launcher = Path(self.cli("launcher", "install", "laptop")["installed"])
+        removed = self.cli("settings", "remove", "laptop")
+        self.assertEqual(removed, {"removed": True, "computer": "laptop", "launcher": True})
+        self.assertEqual(self.cli("status")["computers"], [])
+        self.assertFalse(self.session().exists())
+        self.assertFalse(launcher.exists())
+        self.assertNotIn("laptop", json.loads(config.read_text())["computers"])
+        self.assertEqual([c["computer"] for c in self.cli("computers")], ["other"])
+        self.assertIn("unknown computer", self.cli("settings", "remove", "laptop", check=False).stderr)
+        # The forgotten worker is gone; the same name connects again from a clean record.
+        self.assertEqual(self.cli("connect", "laptop", check=False).returncode, 1)
+        self.assertIsNotNone(self.connect("other"))
+
     def test_restart_during_prepare_finishes_cancelled_recovery_without_launch(self):
         directory = self.session()
         directory.mkdir(parents=True)
@@ -502,6 +557,27 @@ class SettingsTests(unittest.TestCase):
             fcntl.flock(lock, fcntl.LOCK_EX)
             self.assertIn("save is in progress", self.cli("save", draft=draft, ok=False))
         self.assertEqual(self.config.read_bytes(), before)
+
+    def test_remove_without_service_drops_settled_session_and_keeps_pending_recovery(self):
+        self.cli("save", draft=self.draft())
+        directory = self.root / "state/remote-desktops/sessions/home"
+        directory.mkdir(parents=True)
+        (directory / "session.json").write_text(json.dumps({"desired": False, "phase": "idle", "config": {"pairing_uuid": self.uuid}}))
+        (directory / "recovery.json").write_text(json.dumps({"journal": {"output": {"original": "1"}}}))
+        self.assertIn("restore", self.cli("remove", "home", ok=False))
+        self.assertIn("home", json.loads(self.config.read_text())["computers"])
+        (directory / "recovery.json").write_text(json.dumps({"journal": {}}))
+        with (self.root / "state/remote-desktops/writer.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self.assertIn("not responding", self.cli("remove", "home", ok=False))
+        self.assertTrue(directory.exists())
+        self.assertEqual(self.cli("remove", "home"), {"removed": True, "computer": "home", "launcher": False})
+        self.assertFalse(directory.exists())
+        self.assertEqual(json.loads(self.config.read_text())["computers"], {})
+        self.assertIn("unknown computer", self.cli("remove", "home", ok=False))
+        # Without a stale session record the same paired computer can be added again.
+        self.cli("save", draft=self.draft())
+        self.assertIn("home", json.loads(self.config.read_text())["computers"])
 
     def test_removed_computer_session_cannot_gain_a_second_owner(self):
         draft = self.draft()

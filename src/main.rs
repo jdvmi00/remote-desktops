@@ -61,6 +61,8 @@ enum Action {
     Status {
         computer: Option<String>,
     },
+    /// Start the background service if needed and report status; no connection is made.
+    Start,
     Computers,
     /// Guided computer setup and editing.
     Settings {
@@ -166,6 +168,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Action::Focus { computer } => json!({"command":"focus","computer":computer}),
         Action::Status { computer } => json!({"command":"status","computer":computer}),
+        Action::Start => json!({"command":"status"}),
         _ => unreachable!(),
     };
     if matches!(
@@ -175,6 +178,7 @@ async fn run(cli: Cli) -> Result<()> {
             | Action::Disconnect { .. }
             | Action::Restore { .. }
             | Action::Reconnect { .. }
+            | Action::Start
     ) && tokio::net::UnixStream::connect(paths.socket())
         .await
         .is_err()

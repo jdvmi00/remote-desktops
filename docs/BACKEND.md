@@ -49,7 +49,18 @@ cargo build --locked --release
 ./target/release/remote-desktops reconnect macbook
 ./target/release/remote-desktops disconnect macbook
 ./target/release/remote-desktops restore macbook
+./target/release/remote-desktops start
+./target/release/remote-desktops settings remove macbook
 ```
+
+`start` starts the daemon if it is not running and reports status without
+connecting anything. `settings remove` deletes a computer's configuration and
+its generated launcher entry, and forgets its session record only when nothing
+owns it: it refuses while the session is desired, a client is alive, the
+session is still finishing, or a recovery journal is pending. With the daemon
+running, the record is dropped through the daemon's `forget` command;
+otherwise the CLI holds the daemon's writer lock while deleting the directory.
+A computer removed this way can be added again from the same pairing.
 
 Connect/disconnect/restore/reconnect start the daemon on demand. To run it in
 the foreground for development, use `remote-desktops daemon`. A CLI command

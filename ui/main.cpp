@@ -6,6 +6,7 @@
 #include <QQmlContext>
 #include <QQuickWindow>
 #include <QQuickStyle>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QFileInfo>
 #include <QDir>
@@ -25,10 +26,11 @@ int main(int argc, char **argv) {
     parser.addOption({"screenshot", "Save an isolated demo rendering and exit.", "path"});
     parser.addOption({"setup-preview", "Show guided setup (computer, preferences, advanced, check).", "page"});
     parser.addOption({"compact", "Render the preview at the minimum supported size."});
-    parser.addOption({"state", "Initial demo state (restore-pending, preflight, idle, empty, unavailable).", "phase"});
+    parser.addOption({"dialog", "Open a preview surface (help, details, remove, notice, error).", "name"});
+    parser.addOption({"state", "Initial demo state (idle, connecting, preflight, running, attention, restore-pending, empty, unavailable, many, unconfigured).", "phase"});
     parser.process(app);
     const bool demo = parser.isSet("demo");
-    if ((parser.isSet("smoke-test") || parser.isSet("screenshot") || parser.isSet("state") || parser.isSet("compact") || parser.isSet("setup-preview")) && !demo) return 2;
+    if ((parser.isSet("smoke-test") || parser.isSet("screenshot") || parser.isSet("state") || parser.isSet("compact") || parser.isSet("setup-preview") || parser.isSet("dialog")) && !demo) return 2;
     QString backend = parser.value("backend");
     if (backend.isEmpty()) {
         backend = QCoreApplication::applicationDirPath() + "/remote-desktops";
@@ -51,23 +53,40 @@ int main(int argc, char **argv) {
     engine.rootContext()->setContextProperty("theme", &theme);
     engine.load(QUrl("qrc:/qml/Main.qml"));
     if (engine.rootObjects().isEmpty()) return 1;
+    auto *window = engine.rootObjects().first();
+    // Window size and the last selected computer persist between launches.
+    // The preview never writes user settings.
+    QSettings settings;
+    if (!demo) {
+        if (settings.contains("window/width") && settings.contains("window/height")) {
+            window->setProperty("width", qMax(settings.value("window/width").toInt(), window->property("minimumWidth").toInt()));
+            window->setProperty("height", qMax(settings.value("window/height").toInt(), window->property("minimumHeight").toInt()));
+        }
+        window->setProperty("selectedId", settings.value("window/selected").toString());
+        QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [&settings, window] {
+            settings.setValue("window/width", window->property("width"));
+            settings.setValue("window/height", window->property("height"));
+            settings.setValue("window/selected", window->property("selectedId"));
+        });
+    }
     if (parser.isSet("setup-preview")) {
-        auto *setup = engine.rootObjects().first()->findChild<QObject *>("setupDialog");
+        auto *setup = window->findChild<QObject *>("setupDialog");
         QMetaObject::invokeMethod(setup, "begin", Q_ARG(QVariant, QVariant("")));
         const auto page = parser.value("setup-preview");
-        if (page != "computer") QTimer::singleShot(350, setup, [setup, page] {
+        if (page != "computer") QTimer::singleShot(450, setup, [setup, page] {
             QVariantMap host{{"name", "Home workstation"}, {"host", "home.example.net"}, {"pairing_uuid", "11111111-2222-3333-4444-555555555555"}};
             QMetaObject::invokeMethod(setup, "choose", Q_ARG(QVariant, QVariant(host)));
             if (page == "advanced") setup->setProperty("advanced", true);
-            if (page == "check") { setup->setProperty("step", 2); setup->setProperty("tested", true); }
+            if (page == "check") QMetaObject::invokeMethod(setup, "advance");
         });
     }
-    if (parser.isSet("compact")) { engine.rootObjects().first()->setProperty("width", 820); engine.rootObjects().first()->setProperty("height", 650); }
+    if (parser.isSet("compact")) { window->setProperty("width", 880); window->setProperty("height", 600); }
+    if (parser.isSet("dialog")) QTimer::singleShot(300, window, [window, name = parser.value("dialog")] { QMetaObject::invokeMethod(window, "preview", Q_ARG(QVariant, QVariant(name))); });
     if (parser.isSet("smoke-test") || parser.isSet("screenshot")) {
-        QTimer::singleShot(900, &app, [&] {
+        QTimer::singleShot(2200, &app, [&] {
             if (parser.isSet("screenshot")) {
-                auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
-                if (!window || !window->grabWindow().save(parser.value("screenshot"))) warnings = true;
+                auto *quick = qobject_cast<QQuickWindow *>(window);
+                if (!quick || !quick->grabWindow().save(parser.value("screenshot"))) warnings = true;
             }
             app.exit(warnings ? 1 : 0);
         });

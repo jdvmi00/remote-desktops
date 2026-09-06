@@ -148,7 +148,8 @@ impl Manager {
         json!({"computer":r.computer,"profile":r.profile,"desired":r.desired,"phase":r.phase,"error":r.error,
             "generation":r.generation,"pid":if supervisor::alive(&job) {job.pid} else {None},"window":r.window,
             "evidence":r.evidence,"recovery_pending":pending,"recovery_error":recovery_error,
-            "resolved":recovery["resolved"],"launcher":crate::launcher::identity(&r.computer,&r.config)})
+            "resolved":recovery["resolved"],"launcher":crate::launcher::identity(&r.computer,&r.config),
+            "client_version":r.client_version,"launched_at":r.launched_at,"attempts":r.attempts,"next_retry":r.next_retry})
     }
     pub async fn command(self: &Arc<Self>, request: Value) -> Result<Value> {
         let action = request["command"].as_str().context("missing command")?;
@@ -163,6 +164,30 @@ impl Manager {
         }
         if !storage::valid_id(name) {
             bail!("invalid computer ID");
+        }
+        if action == "forget" {
+            // Only a fully settled session may be dropped; a pending recovery
+            // journal or live client keeps its owner record.
+            let mut sessions = self.sessions.lock().unwrap();
+            let r = sessions.get(name).context("computer has no session")?;
+            if r.desired || supervisor::alive(&self.job(r)) {
+                bail!("Disconnect this computer before removing it.");
+            }
+            let recovery = self.paths.session(name).join("recovery.json");
+            if recovery.exists() && host::pending(&recovery)? {
+                bail!("restore-pending: restore the host display before removing this computer");
+            }
+            if !matches!(r.phase.as_str(), "idle" | "attention") {
+                bail!(
+                    "This computer is still finishing its last session. Wait until it is idle before removing it."
+                );
+            }
+            sessions.remove(name);
+            // Dropping the wake sender ends the worker before its next step.
+            self.wakes.lock().unwrap().remove(name);
+            drop(sessions);
+            fs::remove_dir_all(self.paths.session(name))?;
+            return Ok(json!({"forgotten":true,"computer":name}));
         }
         if action == "connect" {
             // Validation/SSH work never holds the global state lock.
@@ -318,6 +343,11 @@ impl Manager {
         let mut windows = self.windows.clone();
         let mut health_due = 0;
         loop {
+            // A forgotten session drops its wake sender; stop before touching
+            // any record a later connect may create under the same name.
+            if wake.has_changed().is_err() {
+                return;
+            }
             let result = self.step(&name, &mut health_due).await;
             let delay = match result {
                 Ok(delay) => delay,
@@ -348,7 +378,7 @@ impl Manager {
                 .get(&name)
                 .is_ok_and(|r| r.desired && r.token.is_some());
             tokio::select! {
-                _=wake.changed()=>{},
+                changed=wake.changed()=>{ if changed.is_err() { return; } },
                 _=windows.changed(), if observing && windows.has_changed().is_ok()=>{},
                 _=tokio::time::sleep(delay)=>{},
             }

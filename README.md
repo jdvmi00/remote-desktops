@@ -51,6 +51,8 @@ cargo build --locked --release
 ./target/release/remote-desktops connect macbook
 ./target/release/remote-desktops status --json
 ./target/release/remote-desktops disconnect macbook
+./target/release/remote-desktops start
+./target/release/remote-desktops settings remove macbook
 ```
 
 Configure and pair your computers first; see [backend usage](docs/BACKEND.md).
@@ -84,9 +86,10 @@ Moonlight, or Sunshine application.
 
 ## Graphical manager
 
-A separate Qt 6/QML manager is available on `develop` for existing configured
-computers. It provides connection controls, profile selection, display recovery,
-and per-computer launchers. Closing it leaves connections running.
+A separate Qt 6/QML manager is available on `develop`. It adds, edits, and
+removes computers paired in Moonlight, and provides connection controls,
+profile selection, display recovery, and per-computer launchers, following the
+active Omarchy theme and desktop font. Closing it leaves connections running.
 
 See [UI build, preview, and interaction guide](docs/UI.md). Pairing and computer
 configuration still use Moonlight and the backend setup guide; no installable
