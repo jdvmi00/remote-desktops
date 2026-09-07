@@ -89,7 +89,7 @@ ApplicationWindow {
         if (selected.desired && selected.resolution) f.push({label: "Requested stream", value: selected.resolution})
         if (selected.desired) f.push({label: "Host display", value: selected.host_display && selected.host_display.verified ? selected.host_display.resolution + " · verified" : "Host resolution unverified"})
         if (selected.desired && selected.client_version && selected.client_version !== "unknown") f.push({label: "Client", value: "Moonlight " + selected.client_version})
-        if (selected.attempts > 0 && selected.next_retry > nowSeconds) f.push({label: "Next attempt", value: "in " + Math.ceil(selected.next_retry - nowSeconds) + " s · attempt " + (selected.attempts + 1) + " of 3"})
+        if (selected.attempts > 0 && selected.next_retry > nowSeconds) f.push({label: "Next attempt", value: "in " + Math.ceil(selected.next_retry - nowSeconds) + " s · retry " + selected.attempts + " of 3"})
         return f
     }
     readonly property string tone: !selected || stale ? "neutral" : recovering || phase === "attention" ? "warning" : connected ? "success" : "neutral"
@@ -159,6 +159,12 @@ ApplicationWindow {
                     color: chipArea.containsMouse ? theme.colors.hover : "transparent"
                     Behavior on color { ColorAnimation { duration: 120 } }
                     readonly property string status: manager.demo ? "Preview service" : manager.serviceBusy ? "Starting service…" : manager.available ? "Service running" : "Service not responding"
+                    activeFocusOnTab: true
+                    Keys.onSpacePressed: manager.refresh()
+                    Keys.onReturnPressed: manager.refresh()
+                    Accessible.onPressAction: manager.refresh()
+                    border.width: activeFocus ? 2 : 0
+                    border.color: theme.colors.accent
                     Accessible.role: Accessible.Button
                     Accessible.name: status + ". Check again."
                     RowLayout {
@@ -278,12 +284,35 @@ ApplicationWindow {
                         id: page
                         width: scroller.availableWidth
                         spacing: 0
+                        // Service banner: one cause, one action.
+                        Rectangle {
+                            objectName: "serviceBanner"
+                            visible: (!manager.available && !manager.loading) || !!manager.error
+                            Layout.fillWidth: true; Layout.topMargin: 22; Layout.leftMargin: 36; Layout.rightMargin: 36
+                            implicitHeight: bannerColumn.implicitHeight + 32; radius: 12
+                            color: theme.colors.warningBg; border.color: theme.colors.warningBorder
+                            ColumnLayout {
+                                id: bannerColumn
+                                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 16; spacing: 8
+                                RowLayout {
+                                    spacing: 10
+                                    Icon { glyph: "alert"; color: theme.colors.warning }
+                                    Label { Layout.fillWidth: true; text: manager.error ? "Computer settings could not be read" : "The background service is not responding"; color: theme.colors.warning; font.weight: Font.DemiBold; wrapMode: Text.WordWrap }
+                                }
+                                Body { Layout.fillWidth: true; text: manager.error || "Open desktop windows keep running. Start the service to see live status, or check again." }
+                                RowLayout {
+                                    Layout.topMargin: 4; spacing: 8
+                                    ActionButton { visible: !manager.available; text: manager.serviceBusy ? "Starting…" : "Start service"; icon.source: "qrc:/qml/icons/play.svg"; enabled: !manager.serviceBusy; hint: "Start the background service without connecting"; onClicked: manager.startService() }
+                                    ActionButton { quiet: true; text: "Check again"; icon.source: "qrc:/qml/icons/refresh.svg"; onClicked: manager.refresh() }
+                                }
+                            }
+                        }
                         // Empty state: warm, and the only place with a headline.
                         ColumnLayout {
-                            visible: !root.selected && !manager.loading
+                            visible: !root.selected && !manager.loading && !manager.error
                             Layout.fillWidth: true; Layout.margins: 36; Layout.topMargin: 72; spacing: 0
                             Rectangle { Layout.alignment: Qt.AlignHCenter; width: 68; height: 68; radius: 20; color: theme.colors.selected; border.color: theme.colors.selectedBorder; ComputerGlyph { anchors.centerIn: parent; scale: 1.4; ink: theme.colors.accentText } }
-                            Label { Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 24; text: "Add your first computer"; color: theme.colors.text; font.pointSize: theme.type.subtitle; font.weight: Font.DemiBold }
+                            Label { Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 24; objectName: "firstComputerHeading"; text: "Add your first computer"; color: theme.colors.text; font.pointSize: theme.type.subtitle; font.weight: Font.DemiBold }
                             Body { Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 8; Layout.maximumWidth: 440; horizontalAlignment: Text.AlignHCenter; text: "Pair a computer in Moonlight, then add it here to open its desktop in a window you can move like any other app." }
                             ActionButton { Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 26; primary: true; icon.source: "qrc:/qml/icons/plus.svg"; text: "Add computer"; enabled: !manager.setupBusy; onClicked: setup.begin("") }
                             ActionButton { Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 6; quiet: true; icon.source: "qrc:/qml/icons/external.svg"; text: "Open the setup guide"; onClicked: Qt.openUrlExternally("https://github.com/jdvmi00/remote-desktops/blob/develop/docs/BACKEND.md") }
@@ -303,28 +332,6 @@ ApplicationWindow {
                                 Body { text: root.selected ? root.platformName(root.selected.platform) : "" }
                                 Body { visible: !!(root.selected && root.selected.host); text: "·"; color: theme.colors.muted }
                                 Body { Layout.fillWidth: true; visible: !!(root.selected && root.selected.host); text: root.selected ? root.selected.host || "" : ""; elide: Text.ElideRight }
-                            }
-                            // Service banner: one cause, one action.
-                            Rectangle {
-                                visible: (!manager.available && !manager.loading) || !!manager.error
-                                Layout.fillWidth: true; Layout.topMargin: 22
-                                implicitHeight: bannerColumn.implicitHeight + 32; radius: 12
-                                color: theme.colors.warningBg; border.color: theme.colors.warningBorder
-                                ColumnLayout {
-                                    id: bannerColumn
-                                    anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 16; spacing: 8
-                                    RowLayout {
-                                        spacing: 10
-                                        Icon { glyph: "alert"; color: theme.colors.warning }
-                                        Label { Layout.fillWidth: true; text: manager.error ? "Computer settings could not be read" : "The background service is not responding"; color: theme.colors.warning; font.weight: Font.DemiBold; wrapMode: Text.WordWrap }
-                                    }
-                                    Body { Layout.fillWidth: true; text: manager.error || "Open desktop windows keep running. Start the service to see live status, or check again." }
-                                    RowLayout {
-                                        Layout.topMargin: 4; spacing: 8
-                                        ActionButton { visible: !manager.available; text: manager.serviceBusy ? "Starting…" : "Start service"; icon.source: "qrc:/qml/icons/play.svg"; enabled: !manager.serviceBusy; hint: "Start the background service without connecting"; onClicked: manager.startService() }
-                                        ActionButton { quiet: true; text: "Check again"; icon.source: "qrc:/qml/icons/refresh.svg"; onClicked: manager.refresh() }
-                                    }
-                                }
                             }
                             // Status card: state, meaning, and only real facts.
                             Rectangle {

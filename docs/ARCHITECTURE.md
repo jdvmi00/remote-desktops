@@ -31,14 +31,23 @@ Moonlight retains hardware decoding and its own rendering/frame pacing.
 - A `forget` command drops a session record only when it is settled: not
   desired, no live client, phase idle or attention, and no pending recovery
   journal. Removing the record also drops its wake channel, which ends the
-  session worker before it can touch a record a later connect creates.
-- Disconnect intent is durable immediately. An already-started host operation
+  session worker before it can touch a record a later connect creates. Removal
+  also requires exclusive recovery and launch-gate ownership and checks live
+  supervisors, including when the daemon is offline.
+- Session updates retry a busy launch gate asynchronously, outside the global
+  session-map mutex, and revalidate the session incarnation before writing.
+  Other computers remain responsive to gate contention. File writes and fsync
+  remain synchronous; this is not a guarantee against stalled storage.
+- Disconnect intent is durable when acknowledged. An already-started host operation
   may finish, but its journal is retained and restored before any client launch.
   Cancelling a task must never erase an uncertain host write.
 - A detached Rust supervisor launches each Moonlight process under a per-token
   lock and session gate. It verifies current intent before spawning, records the
   client PID, and signals job changes over a local datagram socket. Supervisors
   survive daemon restart; a restarted daemon adopts their token-owned processes.
+  A guard kills and reaps a spawned child if supervisor setup returns an error.
+  Abrupt supervisor death between spawning and durably publishing the child PID
+  remains a crash-consistency gap; the error guard does not cover SIGKILL there.
 - Process signals use Linux pidfds and token verification. Window actions
   recheck address, PID, stable identity, class, and title inside Hyprland before
   dispatching. A recycled address is not sufficient ownership evidence.
@@ -180,5 +189,11 @@ missing output, mismatched resolution, or verification timeout stops acceptance
 of the stream and reports an error. This can detect fallback after launch; it
 does not prevent Sunshine from briefly capturing a fallback before detection.
 No configuration flags are treated as proof that the host applied a mode.
-Driver size-list changes are a separate explicit option. The daemon retains
+Driver size-list changes are a separate explicit option. They preserve existing
+mode entries, add missing size/refresh tuples persistently, and retry failed driver
+reloads. Sunshine restores the active display, not the driver XML additions.
+The evidence reader currently rereads from the launch cursor and fails closed
+after 131,072 bytes or 65,536 characters, including during healthy long sessions.
+Incremental parsing needs a separate implementation preserving launch identity,
+partial-write handling, rotation detection, and mismatch revocation. The daemon retains
 session ownership and the helper retains recovery ownership.

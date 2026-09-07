@@ -88,21 +88,7 @@ async fn forget(paths: &Paths, computer: &str) -> Result<()> {
     // No service answers. Holding its writer lock proves none owns the record.
     let _writer = storage::lock(&paths.state.join("writer.lock"), true)
         .context("The service is running but not responding. Try again.")?;
-    let record: Value = storage::read(&directory.join("session.json"))?;
-    if record["desired"] == true {
-        bail!("Disconnect this computer before removing it.");
-    }
-    let recovery = directory.join("recovery.json");
-    if recovery.exists() && host::pending(&recovery)? {
-        bail!("restore-pending: restore the host display before removing this computer");
-    }
-    if !matches!(record["phase"].as_str(), Some("idle" | "attention")) {
-        bail!(
-            "This computer is still finishing its last session. Wait until it is idle before removing it."
-        );
-    }
-    std::fs::remove_dir_all(&directory)?;
-    Ok(())
+    crate::server::retire_session(paths, computer)
 }
 fn load(paths: &Paths) -> Result<Value> {
     match storage::read(&paths.config) {

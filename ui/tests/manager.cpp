@@ -85,8 +85,7 @@ private slots:
         QVariantMap host{{"name", "Home workstation"}, {"host", "home.example.net"}, {"pairing_uuid", "11111111-2222-3333-4444-555555555555"}};
         QVERIFY(QMetaObject::invokeMethod(dialog, "choose", Q_ARG(QVariant, QVariant(host)), Q_ARG(QVariant, QVariant(""))));
         auto *next = dialog->findChild<QObject *>("setupNext");
-        auto *test = dialog->findChild<QObject *>("setupTest");
-        QVERIFY(next && test);
+        QVERIFY(next);
         QVERIFY(next->property("enabled").toBool());
         QVERIFY(QMetaObject::invokeMethod(next, "clicked"));
         QCOMPARE(dialog->property("step").toInt(), 2);
@@ -95,7 +94,7 @@ private slots:
         QTRY_VERIFY(next->property("enabled").toBool());
         QVERIFY(QMetaObject::invokeMethod(dialog, "set", Q_ARG(QVariant, QVariant("name")), Q_ARG(QVariant, QVariant("My home computer"))));
         QVERIFY(!next->property("enabled").toBool());
-        QVERIFY(QMetaObject::invokeMethod(test, "clicked"));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "check"));
         QTRY_VERIFY(next->property("enabled").toBool());
         QVERIFY(QMetaObject::invokeMethod(next, "clicked"));
         QTRY_VERIFY(!dialog->property("visible").toBool());
@@ -114,6 +113,130 @@ private slots:
         QTRY_VERIFY(!dialog->property("visible").toBool());
         QCOMPARE(m.computers().last().toMap()["name"].toString(), QString("My home computer"));
         QCOMPARE(m.computers().first().toMap()["phase"].toString(), QString("window-ready"));
+        QCOMPARE(warnings.count(), 0);
+    }
+    void setupReadFailuresAndInitialCatalogErrorStayVisible() {
+        QTemporaryDir temp;
+        const QString binary = temp.path() + "/backend";
+        auto script = [&](const QByteArray &body) {
+            QFile file(binary); QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            file.write("#!/bin/sh\n" + body); file.close();
+            QVERIFY(file.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        };
+        script("echo 'catalog cannot be read' >&2\nexit 1\n");
+        Manager m(binary, temp.path() + "/missing.socket");
+        Theme theme("/missing/palette");
+        QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.rootContext()->setContextProperty("manager", &m);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window = engine.rootObjects().first();
+        QTRY_VERIFY(!m.loading());
+        QVERIFY(window->findChild<QObject *>("serviceBanner")->property("visible").toBool());
+        QVERIFY(!window->findChild<QObject *>("firstComputerHeading")->property("visible").toBool());
+        auto *dialog = window->findChild<QObject *>("setupDialog");
+        QVERIFY(QMetaObject::invokeMethod(dialog, "begin", Q_ARG(QVariant, QVariant(""))));
+        QTRY_VERIFY(!m.setupBusy());
+        QCOMPARE(dialog->property("errorAction").toString(), QString("catalog"));
+        QVERIFY(!dialog->property("discovering").toBool());
+        QVERIFY(dialog->findChild<QObject *>("setupReadRetry")->property("visible").toBool());
+        script(R"(if [ "$3" = catalog ]; then
+printf '%s\n' '{"paired":[],"revision":"test"}'
+else echo 'discovery transport failed' >&2; exit 1; fi
+)");
+        QVERIFY(QMetaObject::invokeMethod(dialog, "retryRead"));
+        QTRY_COMPARE(dialog->property("errorAction").toString(), QString("discover"));
+        QVERIFY(dialog->property("loaded").toBool());
+        QVERIFY(!dialog->property("discovering").toBool());
+        QVERIFY(dialog->property("error").toString().contains("discovery transport failed"));
+        script(R"(printf '%s\n' '{"candidates":[],"warnings":["Local network discovery unavailable"]}'
+)");
+        QVERIFY(QMetaObject::invokeMethod(dialog, "retryRead"));
+        QTRY_VERIFY(!m.setupBusy());
+        QVERIFY(dialog->property("error").toString().isEmpty());
+        QCOMPARE(dialog->property("discoveryWarning").toString(), QString("Local network discovery unavailable"));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+        script("echo 'get unavailable' >&2\nexit 1\n");
+        QVERIFY(QMetaObject::invokeMethod(dialog, "begin", Q_ARG(QVariant, QVariant("saved-pc"))));
+        QTRY_VERIFY(!m.setupBusy());
+        QCOMPARE(dialog->property("errorAction").toString(), QString("get"));
+        QVERIFY(!dialog->findChild<QObject *>("setupLoadingSettings")->property("visible").toBool());
+        script(R"(if [ "$4" != saved-pc ]; then echo 'lost computer identity' >&2; exit 1; fi
+printf '%s\n' '{"computer":"saved-pc","name":"Saved PC","host":"pc.example","platform":"windows","profile":"desktop","profiles":{},"stream_resolution":"1920x1080","display":{"adapter":"sunshine"}}'
+)");
+        QVERIFY(QMetaObject::invokeMethod(dialog, "retryRead"));
+        QTRY_VERIFY(dialog->property("loaded").toBool());
+        QCOMPARE(dialog->property("draft").toMap()["computer"].toString(), QString("saved-pc"));
+        QCOMPARE(warnings.count(), 0);
+    }
+    void retryCountsMatchScheduledBackendRetries() {
+        QTemporaryDir temp;
+        const QString binary = temp.path() + "/backend";
+        QFile script(binary); QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write(R"(#!/bin/sh
+printf '%s\n' '[{"computer":"retry-pc","profiles":["desktop"]}]'
+)"); script.close();
+        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        QLocalServer server; QVERIFY(server.listen(temp.path() + "/status.socket"));
+        int attempt = 1;
+        connect(&server, &QLocalServer::newConnection, &server, [&] {
+            auto *socket = server.nextPendingConnection();
+            connect(socket, &QLocalSocket::readyRead, socket, [&, socket] {
+                socket->readAll();
+                QJsonObject session{{"computer", "retry-pc"}, {"phase", "preflight"}, {"desired", true},
+                    {"attempts", attempt}, {"next_retry", QDateTime::currentSecsSinceEpoch() + 60}};
+                socket->write(QJsonDocument(QJsonObject{{"ok", true}, {"result", QJsonObject{{"computers", QJsonArray{session}}}}}).toJson(QJsonDocument::Compact) + "\n");
+            });
+            connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
+        });
+        Manager m(binary, server.fullServerName());
+        Theme theme("/missing/palette");
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("manager", &m);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        for (attempt = 1; attempt <= 3; ++attempt) {
+            m.setActive(true); m.poll();
+            QTRY_VERIFY(!m.computers().isEmpty() && m.computers().first().toMap()["attempts"].toInt() == attempt);
+            const auto facts = engine.rootObjects().first()->property("facts").value<QJSValue>().toVariant().toList();
+            bool found = false;
+            for (const auto &fact : facts) if (fact.toMap()["label"] == "Next attempt") {
+                QVERIFY(fact.toMap()["value"].toString().contains(QString("retry %1 of 3").arg(attempt)));
+                found = true;
+            }
+            QVERIFY(found);
+        }
+    }
+    void inspectionSubjectChangesDiscardOldHostEvidence() {
+        Manager m("/missing", "/missing", true);
+        Theme theme("/missing/palette");
+        QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.rootContext()->setContextProperty("manager", &m);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        auto *dialog = engine.rootObjects().first()->findChild<QObject *>("setupDialog");
+        QVERIFY(QMetaObject::invokeMethod(dialog, "begin", Q_ARG(QVariant, QVariant("work"))));
+        QTRY_VERIFY(dialog->property("loaded").toBool());
+        QVariantMap draft{{"host", "a.example"}, {"platform", "windows"}, {"ssh", QVariantMap{{"alias", "pc-a"}}},
+            {"display", QVariantMap{{"adapter", "windows"}, {"device_id", "display-a"}}}};
+        const QVariantMap inspection{{"platform", "windows"}, {"helper", QVariantMap{{"installed", false}}}};
+        auto change = [&](QString key, QVariant value) {
+            QVERIFY(QMetaObject::invokeMethod(dialog, "set", Q_ARG(QVariant, QVariant(key)), Q_ARG(QVariant, value)));
+        };
+        dialog->setProperty("draft", draft); dialog->setProperty("inspection", inspection);
+        change("name", "New name"); change("bitrate", 45000);
+        QCOMPARE(dialog->property("inspection").toMap(), inspection);
+        for (const auto &entry : QVariantMap{{"host", "b.example"}, {"platform", "macos"}, {"ssh", QVariantMap{{"alias", "pc-b"}}},
+                {"display", QVariantMap{{"adapter", "virtual"}}}}.asKeyValueRange()) {
+            dialog->setProperty("draft", draft); dialog->setProperty("inspection", inspection);
+            change(entry.first, entry.second);
+            QVERIFY(dialog->property("inspection").toMap().isEmpty());
+            QVERIFY(!dialog->findChild<QObject *>("setupInstall")->property("visible").toBool());
+        }
         QCOMPARE(warnings.count(), 0);
     }
     void themeSurvivesAtomicFilesAndDirectoryReplacement() {

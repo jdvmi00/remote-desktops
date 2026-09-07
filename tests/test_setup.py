@@ -54,21 +54,43 @@ class SetupTests(unittest.TestCase):
         self.shim("avahi-browse", "printf '%s' '" + AVAHI + "'\n")
         found = setup.discover()["candidates"]
         names = [c["name"] for c in found]
-        self.assertEqual(names, ["Garage", "Work PC", "Studio"], "online first, then by name; merged; phones excluded")
+        self.assertEqual(names, ["Garage", "Work PC", "Work PC", "Studio"], "unproven same-name hosts stay separate; phones excluded")
         work = found[1]
         self.assertEqual(work["platform"], "windows")
         self.assertEqual(work["pairing_uuid"], "11111111-2222-3333-4444-555555555555")
-        self.assertEqual(work["addresses"], ["work.tail.ts.net", "100.1.1.1", "work-pc.local", "192.168.1.5"])
+        self.assertEqual(work["addresses"], ["work.tail.ts.net", "100.1.1.1"])
         self.assertIsNone(found[0]["platform"])
         self.assertIsNone(found[0]["pairing_uuid"])
-        self.assertFalse(found[2]["online"])
+        self.assertFalse(found[3]["online"])
 
     def test_discovery_survives_missing_or_broken_tools(self):
         with patch.dict(os.environ, {"PATH": str(self.bin)}):
             self.assertEqual(setup.discover()["candidates"], [])
             self.shim("tailscale", "echo not-json\n")
             self.shim("avahi-browse", "exit 3\n")
-            self.assertEqual(setup.discover()["candidates"], [])
+            result = setup.discover()
+            self.assertEqual(result["candidates"], [])
+            self.assertEqual(len(result["warnings"]), 2)
+
+    def test_discovery_uses_only_unique_full_address_pairing(self):
+        def entry(host, addresses):
+            return {"name": "Desktop", "host": host, "addresses": addresses,
+                    "platform": None, "online": True, "source": "lan"}
+        first = entry("desk.example", ["desk.example", "192.0.2.1"])
+        second = entry("desk.local", ["desk.local", "192.0.2.2"])
+        bridge = entry("alias.local", ["192.0.2.1", "alias.local"])
+        paired = {"one": {"paired": True, "address": "ALIAS.LOCAL.", "name": "other"}}
+        with patch.object(setup, "tailscale_peers", return_value=[first]), \
+                patch.object(setup, "lan_hosts", return_value=[second, bridge]), \
+                patch.object(setup, "moonlight_hosts", return_value=paired):
+            result = setup.discover()["candidates"]
+        self.assertEqual(len(result), 2)
+        self.assertEqual([c["pairing_uuid"] for c in result], [None, "one"])
+        paired["two"] = {"paired": True, "address": "192.0.2.1", "name": "Desktop"}
+        with patch.object(setup, "tailscale_peers", return_value=[]), \
+                patch.object(setup, "lan_hosts", return_value=[bridge]), \
+                patch.object(setup, "moonlight_hosts", return_value=paired):
+            self.assertIsNone(setup.discover()["candidates"][0]["pairing_uuid"])
 
     def test_pair_reads_the_new_host_back_from_moonlight(self):
         self.shim("pgrep", "exit 1\n")

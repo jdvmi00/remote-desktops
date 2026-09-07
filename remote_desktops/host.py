@@ -11,7 +11,7 @@ import re
 import shutil
 import socket
 import subprocess
-from .storage import atomic_json, read_json
+from .storage import read_json
 from .mac_display import same_setting, manages_mode
 from . import virtual_display, windows_display
 

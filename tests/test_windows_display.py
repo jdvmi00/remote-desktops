@@ -82,5 +82,13 @@ class WindowsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'alias'):
             w.powershell('-oProxyCommand=bad', '')
 
+class VirtualModeTests(unittest.TestCase):
+    def test_reload_failure_is_actionable(self):
+        from remote_desktops import virtual_display
+        with patch.object(virtual_display.windows_display, "powershell", return_value={"ok": False, "error": "virtual-display-reload-failed: retry"}):
+            with self.assertRaisesRegex(ValueError, "virtual-display-reload-failed"):
+                virtual_display.sync("fake-pc", "1920x1080", refresh=120)
+
+
 if __name__ == '__main__':
     unittest.main()

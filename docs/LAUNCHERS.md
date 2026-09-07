@@ -92,8 +92,13 @@ windows tiled. User files load after Omarchy's defaults and the last matching
 anonymous rule wins, so the window opens tiled from the start and the startup
 transition disappears. The block is replaced or removed as a unit, a one-time
 backup of the file is kept beside it, and Hyprland's config check runs after
-every change; a rejected change is undone. A hand-written rule is detected and
-left alone. The rule applies to every Moonlight window, not only managed ones.
+every change. Malformed block markers are rejected before writing. Failed
+reload or validation restores the previous file if it still matches the app's
+write; concurrent external edits are preserved and reported for manual review.
+App edits use the adjacent `hyprland.lua.remote-desktops.lock`; manual editors
+should honor it too. Content comparisons cannot make an uncooperative write
+racing the final replacement transactional. A hand-written rule is detected
+and left alone. The rule applies to every Moonlight window, not only managed ones.
 
 There is no ongoing fullscreen or placement correction. User fullscreen choices
 survive repeated opens, workspace changes, and daemon restart. Reconnect creates

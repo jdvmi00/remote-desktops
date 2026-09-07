@@ -28,7 +28,7 @@ def script(width, height, settings, refresh=60):
 
 
 def sync(alias, resolution, settings=SETTINGS, refresh=60):
-    """Make sure the virtual display offers `resolution`; returns the driver's size list."""
+    """Persist a requested mode and reload changes; capture verification proves use."""
     m = RESOLUTION.fullmatch(resolution or "")
     if not m:
         raise ValueError("resolution must be WIDTHxHEIGHT")
@@ -37,7 +37,7 @@ def sync(alias, resolution, settings=SETTINGS, refresh=60):
         raise ValueError(reply.get("error", "virtual display update failed"))
     result = reply["result"]
     if resolution not in (result.get("modes") or []):
-        raise ValueError("virtual-display-mode-missing: the driver did not accept " + resolution)
+        raise ValueError("virtual-display-mode-missing: the settings do not contain " + resolution)
     return result
 
 

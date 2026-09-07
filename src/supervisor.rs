@@ -103,6 +103,25 @@ pub fn log_event(line: &str) -> Option<Value> {
     }
     None
 }
+/// std::process::Child does not stop its process on drop. Keep ownership on
+/// every fallible post-spawn path, including failure to publish its PID.
+struct ClientGuard(std::process::Child);
+impl Drop for ClientGuard {
+    fn drop(&mut self) {
+        // This Child still owns an unreaped PID; kill cannot target a recycled
+        // process. After a successful wait, Child::kill is a harmless no-op.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn publish_client(
+    child: std::process::Child,
+    publish_pid: impl FnOnce(u32) -> Result<()>,
+) -> Result<ClientGuard> {
+    let guard = ClientGuard(child);
+    publish_pid(guard.0.id())?;
+    Ok(guard)
+}
 pub fn run(directory: &Path, token: &str, runtime: &Path) -> Result<()> {
     let _job_lock = storage::lock(&directory.join(format!("job-{token}.lock")), true)?;
     let gate = storage::lock(&directory.join("gate.lock"), false)?;
@@ -132,7 +151,7 @@ pub fn run(directory: &Path, token: &str, runtime: &Path) -> Result<()> {
         .stdout(writer.try_clone()?)
         .stderr(writer);
     let child = command.spawn();
-    let mut child = match child {
+    let child = match child {
         Ok(c) => c,
         Err(error) => {
             job.ended = true;
@@ -141,8 +160,10 @@ pub fn run(directory: &Path, token: &str, runtime: &Path) -> Result<()> {
             return Err(error.into());
         }
     };
-    job.pid = Some(child.id());
-    publish(directory, runtime, &name, &job)?;
+    let mut child = publish_client(child, |pid| {
+        job.pid = Some(pid);
+        publish(directory, runtime, &name, &job)
+    })?;
     drop(gate);
     let supported = record.client_version.starts_with("6.1.");
     job.evidence["parser"] = json!(if supported {
@@ -184,7 +205,7 @@ pub fn run(directory: &Path, token: &str, runtime: &Path) -> Result<()> {
         }
         Ok(job)
     });
-    let success = child.wait()?.success();
+    let success = child.0.wait()?.success();
     // A helper may retain the output pipe after Moonlight exits. Client exit,
     // not logger EOF, determines session completion.
     let _ = shutdown.shutdown(std::net::Shutdown::Read);
@@ -199,6 +220,23 @@ pub fn run(directory: &Path, token: &str, runtime: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_pid_publication_kills_and_reaps_client() {
+        let child = Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = child.id();
+        let result = publish_client(child, |_| anyhow::bail!("injected PID publication failure"));
+        assert!(result.is_err());
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
     #[test]
     fn logs_keep_only_typed_evidence() {
         assert_eq!(
