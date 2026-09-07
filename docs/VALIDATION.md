@@ -43,8 +43,8 @@ load; they are not CI performance thresholds or streaming latency claims.
 No real Mac/Windows host, Sunshine connection, decoder, audio path, or input
 latency was exercised. Measure active-session memory/CPU, compositor activity,
 host health checks, startup/reconnect time, and Moonlight video statistics during
-the separately planned live handoff. GUI overhead remains unmeasured because
-the Qt manager is a subsequent feature.
+the separately planned live handoff. GUI overhead was not measured in this initial backend sample. The Qt manager
+is now implemented, but these historical measurements do not measure it.
 
 ## Live MacBook validation
 
@@ -102,10 +102,11 @@ process without resetting fullscreen. There was exactly one matching window.
 The automated suite additionally covers launcher installation/removal, preserving
 unrelated files, Exec escaping, unique configured window titles, two concurrent
 clients, ignoring temporary startup titles, and startup policy only once per
-matched window. The current suite contains eight Rust tests, thirty Python
+matched window. At that validation checkpoint, the suite contained eight Rust tests, thirty Python
 repository/host tests, and fourteen daemon integration tests.
 
 The earlier fullscreen integration issue is now handled once at initial window
 matching. A brief startup transition remains possible. Separate Wayland taskbar
 grouping is not promised because Moonlight shares one application ID. Generic
-Hypertile Scenes consumption and GUI configuration remain separate features.
+Hypertile Scenes consumption remains owned by Hypertile. GUI configuration was
+added after this validation checkpoint; the observations above do not validate it.

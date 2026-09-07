@@ -53,7 +53,10 @@ For verified matching, each launch records the Sunshine log position before star
 new log output must identify the selected output and confirm the requested host
 resolution. A missing display, wrong resolution, rotated log, or verification
 timeout is an error; fallback capture is not accepted as successful matching.
-Raw host logs are not persisted. The reported host resolution is launch-scoped
+Raw host logs are not persisted. The current reader retains its launch cursor
+and rereads up to 131,072 bytes and 65,536 characters. A long or noisy session
+can exceed this bound and fail closed with `display-verification-lost`; reconnect
+to establish a new observation. Incremental log parsing is not implemented. The reported host resolution is launch-scoped
 Sunshine evidence, not an independent measurement of every subsequent display
 change. Unsupported log formats remain unverified. In this verified mode, Refit is enabled only for
 `stream_resolution = auto` sessions with recent verified host evidence, and the
@@ -64,6 +67,11 @@ adds the stream size to `display.settings` (default
 `C:\VirtualDisplayDriver\vdd_settings.xml`) over SSH and requests a driver reload.
 Leave this off for physical monitors and drivers with host-managed modes. The XML
 list alone never verifies the active modes or a successful capture. Existing
+size/refresh entries are preserved, and additions persist after disconnect;
+Sunshine restores the active display, not this XML configuration. A failed reload
+is reported and retried on the next sync, even when the requested entry already
+exists. Adjacent `.remote-desktops.lock` and `.remote-desktops.reload-pending`
+files serialize app edits and retain unfinished reload intent. No reload is requested for an unchanged list after a successful sync. Existing
 profiles are not migrated; old `virtual` profiles need their capture output
 selected in setup before their next connection.
 
@@ -73,7 +81,9 @@ fitted for that monitor and workspace, or `display.initial_resolution` (falling 
 A connect never restarts to fit. `refit COMPUTER`, or `refit` for the focused
 Moonlight window, is the only thing that matches the stream to the window: it
 restarts once at the window's current size, remembers it, and returns the window
-to the workspace it was on. `auto` needs Hyprland; elsewhere the connection fails
+to the workspace it was on. Sunshine profiles can connect without Hyprland using the saved initial or
+default size, including when set to `auto`. Explicit Refit requires an owned
+window. For other adapters, `auto` needs Hyprland; elsewhere the connection fails
 with `fit-unavailable`. Status reports the size in use as `resolution` with
 `fit_window`.
 

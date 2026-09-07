@@ -51,5 +51,5 @@ try {
  if ((Get-Content $testPath -Raw | ConvertFrom-Json).value -ne 2) {throw 'Atomic journal replacement failed'}
 } finally {Remove-Item $testPath -ErrorAction SilentlyContinue}
 if ([Runtime.InteropServices.Marshal]::SizeOf([type][HypertileDisplay+DisplayPath]) -ne 72 -or [Runtime.InteropServices.Marshal]::SizeOf([type][HypertileDisplay+Mode]) -ne 64) {throw 'Native display layout mismatch'}
-if ($PolicyOnly) {@{tests_passed=($cases.Count+$activityCases.Count+1)} | ConvertTo-Json;exit 0}
+if ($PolicyOnly) { & (Join-Path $PSScriptRoot 'Test-VirtualDisplayModes.ps1'); @{tests_passed=($cases.Count+$activityCases.Count+7)} | ConvertTo-Json;exit 0}
 @{tests_passed=($cases.Count+$activityCases.Count+1);devices=@([HypertileDisplay]::Inspect());baseline=[HypertileDisplay]::Capture()} | ConvertTo-Json -Depth 12

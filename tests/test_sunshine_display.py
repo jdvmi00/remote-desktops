@@ -80,6 +80,16 @@ class SunshineDisplayTests(unittest.TestCase):
                 sd.health(self.record, self.host)
         self.assertFalse(self.record['resolved']['host_display']['verified'])
 
+    def test_long_session_log_bound_revokes_verification_without_advancing_cursor(self):
+        for update in ({'text': 'x' * 65537}, {'offset': 100 + 131073}, {'offset': 99}):
+            with self.subTest(update=list(update)):
+                self.record['resolved']['host_display'] = {'verified': True}
+                with patch.object(sd.windows_display, 'powershell', return_value={**self.reply, **update}):
+                    with self.assertRaisesRegex(ValueError, 'display-verification-lost'):
+                        sd.health(self.record, self.host)
+                self.assertFalse(self.record['resolved']['host_display']['verified'])
+                self.assertEqual(self.record['display_observation']['offset'], 100)
+
     def test_later_launch_cannot_reuse_an_earlier_matching_capture(self):
         self.reply['text'] += 'Using the following configuration:\n' + json.dumps({
             'device_id': '{' + UUID + '}', 'resolution': {'width': 1102, 'height': 1246}})

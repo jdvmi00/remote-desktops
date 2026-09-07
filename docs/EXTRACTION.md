@@ -4,8 +4,9 @@ The first backend extraction is implemented on `develop`; see
 [architecture](ARCHITECTURE.md), [usage](BACKEND.md), and
 [provenance](PROVENANCE.md). Per-computer [launcher entries](LAUNCHERS.md) and
 window matching are implemented. Live MacBook handoff has been tested explicitly;
-there is no automatic migration. Graphical UI, generic Scenes support, and
-packaging remain subsequent features.
+there is no automatic migration. The graphical manager now provides guided
+setup and connection controls. Generic Scenes support belongs to Hypertile;
+installable packaging remains outstanding.
 
 ## Boundary
 

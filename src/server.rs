@@ -34,6 +34,8 @@ pub fn now() -> u64 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Session {
     pub version: u32,
+    #[serde(default)]
+    pub incarnation: String,
     pub computer: String,
     pub profile: String,
     pub config: Value,
@@ -70,6 +72,7 @@ impl Session {
     fn new(computer: &str, profile: &str, config: Value, settings: Value) -> Self {
         Self {
             version: 1,
+            incarnation: uuid::Uuid::new_v4().to_string(),
             computer: computer.into(),
             profile: profile.into(),
             config,
@@ -110,11 +113,6 @@ pub struct Manager {
     windows: watch::Receiver<Vec<Window>>,
 }
 impl Manager {
-    fn save(&self, record: &Session) -> Result<()> {
-        let directory = self.paths.session(&record.computer);
-        let _gate = storage::lock(&directory.join("gate.lock"), false)?;
-        storage::write(&directory.join("session.json"), record)
-    }
     fn get(&self, name: &str) -> Result<Session> {
         self.sessions
             .lock()
@@ -123,16 +121,36 @@ impl Manager {
             .cloned()
             .context("computer has no session")
     }
-    fn update(&self, name: &str, change: impl FnOnce(&mut Session)) -> Result<Session> {
-        let mut sessions = self.sessions.lock().unwrap();
-        let record = sessions.get_mut(name).context("computer has no session")?;
-        let mut updated = record.clone();
-        change(&mut updated);
-        if updated != *record {
-            self.save(&updated)?;
-            *record = updated.clone();
+    async fn update(&self, name: &str, change: impl FnOnce(&mut Session)) -> Result<Session> {
+        let incarnation = self.get(name)?.incarnation;
+        loop {
+            {
+                // Acquire the gate only while the current directory is protected
+                // from forget/recreate. Never wait for it under the global mutex.
+                let mut sessions = self.sessions.lock().unwrap();
+                let record = sessions.get_mut(name).context("computer has no session")?;
+                if record.incarnation != incarnation {
+                    bail!("session changed while waiting; retry the command");
+                }
+                match storage::lock(&self.paths.session(name).join("gate.lock"), true) {
+                    Ok(_gate) => {
+                        let mut updated = record.clone();
+                        change(&mut updated);
+                        if updated != *record {
+                            storage::write(
+                                &self.paths.session(name).join("session.json"),
+                                &updated,
+                            )?;
+                            *record = updated.clone();
+                        }
+                        return Ok(updated);
+                    }
+                    Err(error) if storage::lock_contended(&error) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        Ok(updated)
     }
     fn wake(&self, name: &str) {
         if let Some(wake) = self.wakes.lock().unwrap().get(name) {
@@ -170,7 +188,10 @@ impl Manager {
             && observed["checked_at"]
                 .as_u64()
                 .is_some_and(|at| now().saturating_sub(at) <= 20);
-        let refit_available = r.fits_window()
+        let refit_available = r.desired
+            && supervisor::alive(&job)
+            && r.window.is_some()
+            && r.fits_window()
             && (r.settings["display"]["adapter"] == "sunshine"
                 || (r.settings["display"]["adapter"] == "virtual" && verified));
         json!({"computer":r.computer,"profile":r.profile,"desired":r.desired,"phase":r.phase,"error":r.error,
@@ -245,7 +266,8 @@ impl Manager {
                 r.reconnect = true;
                 r.phase = "reconnecting".into();
                 r.refit_workspace = Some(window.workspace);
-            })?;
+            })
+            .await?;
             eprintln!("{target}: refitting the stream to {observed}");
             self.wake(&target);
             return Ok(self.public(&self.get(&target)?));
@@ -261,20 +283,9 @@ impl Manager {
             if r.desired || supervisor::alive(&self.job(r)) {
                 bail!("Disconnect this computer before removing it.");
             }
-            let recovery = self.paths.session(name).join("recovery.json");
-            if recovery.exists() && host::pending(&recovery)? {
-                bail!("restore-pending: restore the host display before removing this computer");
-            }
-            if !matches!(r.phase.as_str(), "idle" | "attention") {
-                bail!(
-                    "This computer is still finishing its last session. Wait until it is idle before removing it."
-                );
-            }
+            retire_session(&self.paths, name)?;
             sessions.remove(name);
-            // Dropping the wake sender ends the worker before its next step.
             self.wakes.lock().unwrap().remove(name);
-            drop(sessions);
-            fs::remove_dir_all(self.paths.session(name))?;
             return Ok(json!({"forgotten":true,"computer":name}));
         }
         if action == "connect" {
@@ -317,8 +328,10 @@ impl Manager {
                 return Ok(self.public(old));
             }
             let directory = self.paths.session(name);
-            storage::private_dir(&directory)?;
             let mut sessions = self.sessions.lock().unwrap();
+            storage::private_dir(&directory)?;
+            let _gate = storage::lock(&directory.join("gate.lock"), true)
+                .context("client launch is still settling; try connecting again")?;
             // Another concurrent connect may have completed while validation ran.
             if let Some(old) = sessions.get(name) {
                 if old.desired {
@@ -363,7 +376,7 @@ impl Manager {
                 &directory.join("recovery.json"),
                 &json!({"config":record.config,"settings":record.settings,"journal":{}}),
             )?;
-            self.save(&record)?;
+            storage::write(&directory.join("session.json"), &record)?;
             sessions.insert(name.into(), record.clone());
             drop(sessions);
             self.start(name);
@@ -390,7 +403,8 @@ impl Manager {
                 r.phase = "release-pending".into();
                 r.release = true;
                 r.generation += 1;
-            })?;
+            })
+            .await?;
         } else if action == "disconnect" || action == "restore" {
             self.update(name, |r| {
                 r.desired = false;
@@ -399,7 +413,8 @@ impl Manager {
                 r.generation += 1;
                 r.error = None;
                 r.next_retry = 0;
-            })?;
+            })
+            .await?;
         } else if action == "reconnect" {
             if !old.desired || !supervisor::alive(&self.job(&old)) {
                 bail!("connect this computer first");
@@ -410,7 +425,8 @@ impl Manager {
                     r.phase = "reconnecting".into();
                     r.generation += 1;
                     r.error = None;
-                })?;
+                })
+                .await?;
             }
         } else {
             bail!("unknown command");
@@ -450,27 +466,32 @@ impl Manager {
                 return;
             }
             let result = self.step(&name, &mut health_due).await;
+            if wake.has_changed().is_err() {
+                return;
+            }
             let delay = match result {
                 Ok(delay) => delay,
                 Err(error) => {
                     // Keep the cause chain: "launch supervisor" alone hides the reason.
                     let message = format!("{error:#}");
-                    let _ = self.update(&name, |r| {
-                        if message.contains("host-unreachable")
-                            && r.desired
-                            && r.token.is_none()
-                            && r.attempts < 3
-                        {
-                            r.attempts += 1;
-                            r.next_retry = now() + [2, 5, 15][(r.attempts - 1) as usize];
-                            r.phase = "preflight".into();
-                        } else {
-                            r.desired = false;
-                            r.reconnect = false;
-                            r.phase = "stopping".into();
-                        }
-                        r.error = Some(message);
-                    });
+                    let _ = self
+                        .update(&name, |r| {
+                            if message.contains("host-unreachable")
+                                && r.desired
+                                && r.token.is_none()
+                                && r.attempts < 3
+                            {
+                                r.attempts += 1;
+                                r.next_retry = now() + [2, 5, 15][(r.attempts - 1) as usize];
+                                r.phase = "preflight".into();
+                            } else {
+                                r.desired = false;
+                                r.reconnect = false;
+                                r.phase = "stopping".into();
+                            }
+                            r.error = Some(message);
+                        })
+                        .await;
                     Duration::from_secs(1)
                 }
             };
@@ -496,7 +517,7 @@ impl Manager {
             if alive {
                 let closing = r.closing_at.unwrap_or_else(now);
                 if r.closing_at.is_none() {
-                    self.update(name, |r| r.closing_at = Some(closing))?;
+                    self.update(name, |r| r.closing_at = Some(closing)).await?;
                     if let Some(window) = &r.window {
                         let _ = desktop::action(window, "close").await;
                     }
@@ -520,7 +541,8 @@ impl Manager {
                     r.reconnect = false;
                     r.closing_at = None;
                     r.phase = "preflight".into();
-                })?;
+                })
+                .await?;
                 return Ok(Duration::ZERO);
             }
             if r.release {
@@ -534,7 +556,8 @@ impl Manager {
                     r.error = None;
                     r.window = None;
                     r.token = None;
-                })?;
+                })
+                .await?;
                 return Ok(Duration::from_secs(86400));
             }
             if host::pending(&recovery)? {
@@ -547,7 +570,8 @@ impl Manager {
                             if let Err(e) = result {
                                 r.error = Some(e.to_string());
                             }
-                        })?;
+                        })
+                        .await?;
                         return Ok(Duration::from_secs(10));
                     }
                 }
@@ -562,7 +586,8 @@ impl Manager {
                 r.token = None;
                 r.window = None;
                 r.closing_at = None;
-            })?;
+            })
+            .await?;
             return Ok(Duration::from_secs(86400));
         }
         if r.token.is_none() {
@@ -597,19 +622,24 @@ impl Manager {
                 match r.resolution.clone() {
                     Some(size) => Some(size),
                     None => {
-                        let (key, size) = desktop::predict(
-                            &r.learned,
-                            r.settings["display"]["initial_resolution"]
-                                .as_str()
-                                .or_else(|| {
-                                    r.settings["stream_resolution"]
-                                        .as_str()
-                                        .filter(|size| *size != "auto")
-                                })
-                                .unwrap_or("1920x1080"),
-                        )
-                        .await
-                        .context("fit-unavailable: fitting the window needs Hyprland")?;
+                        let initial = r.settings["display"]["initial_resolution"]
+                            .as_str()
+                            .or_else(|| {
+                                r.settings["stream_resolution"]
+                                    .as_str()
+                                    .filter(|size| *size != "auto")
+                            })
+                            .unwrap_or("1920x1080");
+                        let (key, size) = match desktop::predict(&r.learned, initial).await {
+                            Ok(prediction) => prediction,
+                            Err(_) if r.settings["display"]["adapter"] == "sunshine" => {
+                                ("saved resolution".into(), initial.to_string())
+                            }
+                            Err(error) => {
+                                return Err(error)
+                                    .context("fit-unavailable: fitting the window needs Hyprland");
+                            }
+                        };
                         eprintln!("{name}: launching {key} at last known {size}");
                         Some(size)
                     }
@@ -617,10 +647,12 @@ impl Manager {
             } else {
                 None
             };
-            r = self.update(name, |r| {
-                r.phase = "preflight".into();
-                r.resolution = resolution;
-            })?;
+            r = self
+                .update(name, |r| {
+                    r.phase = "preflight".into();
+                    r.resolution = resolution;
+                })
+                .await?;
             let info = host::call(
                 json!({"operation":"probe","path":recovery,"stream_resolution":r.resolution}),
             )
@@ -628,22 +660,24 @@ impl Manager {
             if !self.get(name)?.desired {
                 return Ok(Duration::ZERO);
             }
-            self.update(name, |r| r.phase = "preparing".into())?;
+            self.update(name, |r| r.phase = "preparing".into()).await?;
             host::operation(&recovery, "prepare").await?;
             if !self.get(name)?.desired {
                 return Ok(Duration::ZERO);
             }
-            r = self.update(name, |r| {
-                r.argv = serde_json::from_value(info["argv"].clone()).unwrap_or_default();
-                r.client_version = info["resolved"]["client_version"]
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .into();
-                r.token = Some(uuid::Uuid::new_v4().simple().to_string());
-                r.phase = "connecting".into();
-                r.launched_at = now();
-                r.error = None;
-            })?;
+            r = self
+                .update(name, |r| {
+                    r.argv = serde_json::from_value(info["argv"].clone()).unwrap_or_default();
+                    r.client_version = info["resolved"]["client_version"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .into();
+                    r.token = Some(uuid::Uuid::new_v4().simple().to_string());
+                    r.phase = "connecting".into();
+                    r.launched_at = now();
+                    r.error = None;
+                })
+                .await?;
             let mut command = Command::new(&self.executable);
             command
                 .args(["supervise", "--directory"])
@@ -672,7 +706,8 @@ impl Manager {
                     r.attempts += 1;
                     r.next_retry = now() + [2, 5, 15][(r.attempts - 1) as usize];
                     r.phase = "preflight".into();
-                })?;
+                })
+                .await?;
             } else {
                 self.update(name, |r| {
                     r.desired = false;
@@ -681,7 +716,8 @@ impl Manager {
                     if !(job.success || job.evidence["quit"] == true) {
                         r.error = Some("stream-exited: reconnect after recovery".into());
                     }
-                })?;
+                })
+                .await?;
             }
             return Ok(Duration::ZERO);
         }
@@ -701,11 +737,14 @@ impl Manager {
                 if r.initialized_window.as_ref() != Some(&key) {
                     // Consume startup policy durably before dispatch: a crash
                     // must not cause a restart to undo a later user choice.
-                    r = self.update(name, |r| r.initialized_window = Some(key))?;
+                    r = self
+                        .update(name, |r| r.initialized_window = Some(key))
+                        .await?;
                     if let Err(e) = desktop::initialize(w, name).await {
                         self.update(name, |r| {
                             r.error = Some(format!("window initialization: {e}"))
-                        })?;
+                        })
+                        .await?;
                     }
                     // A refit restart may reopen the window on the active
                     // workspace; return it to where the user had put it.
@@ -713,7 +752,7 @@ impl Manager {
                         if w.workspace != ws {
                             let _ = desktop::action(w, &format!("workspace:{ws}")).await;
                         }
-                        r = self.update(name, |r| r.refit_workspace = None)?;
+                        r = self.update(name, |r| r.refit_workspace = None).await?;
                     }
                 }
             }
@@ -727,16 +766,18 @@ impl Manager {
             // Observed geometry is never fed back into placement. It only sizes
             // the stream, once, for profiles that fit the window.
             if window != r.window || r.evidence != job.evidence || r.phase == "connecting" {
-                r = self.update(name, |r| {
-                    r.window = window;
-                    r.evidence = job.evidence.clone();
-                    r.phase = if r.window.is_some() {
-                        "window-ready"
-                    } else {
-                        "running"
-                    }
-                    .into();
-                })?;
+                r = self
+                    .update(name, |r| {
+                        r.window = window;
+                        r.evidence = job.evidence.clone();
+                        r.phase = if r.window.is_some() {
+                            "window-ready"
+                        } else {
+                            "running"
+                        }
+                        .into();
+                    })
+                    .await?;
             }
             let delay = Duration::from_secs(10);
             if *health_due <= now()
@@ -752,7 +793,8 @@ impl Manager {
                                 r.reconnect = true;
                                 r.phase = "reconnecting".into();
                             }
-                        })?;
+                        })
+                        .await?;
                         return Ok(Duration::ZERO);
                     }
                     Ok(value) => {
@@ -762,13 +804,14 @@ impl Manager {
                             } else {
                                 None
                             }
-                        })?;
+                        })
+                        .await?;
                     }
                     Err(e)
                         if (e.to_string().contains("host-unreachable")
                             || e.to_string().contains("TimeoutExpired")) =>
                     {
-                        self.update(name, |r| r.error = Some(e.to_string()))?;
+                        self.update(name, |r| r.error = Some(e.to_string())).await?;
                     }
                     Err(e) => return Err(e),
                 }
@@ -777,6 +820,51 @@ impl Manager {
         }
         Ok(Duration::from_secs(10))
     }
+}
+
+/// Retire only a durably settled directory. Callers hold the daemon's session
+/// map mutex or its exclusive writer lock, serializing this rename with connect.
+pub fn retire_session(paths: &Paths, name: &str) -> Result<()> {
+    let directory = paths.session(name);
+    let _gate = storage::lock(&directory.join("gate.lock"), true)
+        .context("client launch is still settling; try removing again")?;
+    let _recovery = storage::lock(&directory.join("recovery.lock"), true)
+        .context("host operation still running; try removing again")?;
+    let record: Session = storage::read(&directory.join("session.json"))?;
+    if record.version != 1 || record.computer != name {
+        bail!("unsupported session state; session preserved");
+    }
+    let job = record
+        .token
+        .as_ref()
+        .map(|token| supervisor::read_job(&directory, token))
+        .unwrap_or_default();
+    if record.desired || supervisor::alive(&job) || supervisor::owned(job.supervisor, &job.token) {
+        bail!("Disconnect this computer and wait before removing it.");
+    }
+    let recovery = directory.join("recovery.json");
+    if !recovery.exists() || host::pending(&recovery)? {
+        bail!("restore-pending: verify and restore the host display before removing this computer");
+    }
+    if !matches!(record.phase.as_str(), "idle" | "attention") {
+        bail!(
+            "This computer is still finishing its last session. Wait until it is idle before removing it."
+        );
+    }
+    let retired = paths
+        .state
+        .join(format!(".forgotten-{}", uuid::Uuid::new_v4()));
+    fs::rename(&directory, &retired)
+        .context("could not retire session; its record was preserved")?;
+    // The atomic rename is the lifecycle transition. Cleanup can never delete
+    // a subsequent session using the same computer ID.
+    if let Err(error) = fs::remove_dir_all(&retired) {
+        eprintln!(
+            "could not clean retired session {}: {error}",
+            retired.display()
+        );
+    }
+    Ok(())
 }
 
 pub async fn serve(paths: Paths) -> Result<()> {

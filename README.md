@@ -16,17 +16,19 @@ adding, editing, and connecting computers paired in Moonlight. Installable packa
 
 The host adapters come from the remote-stream work in
 [Hypertile](https://github.com/jdvmi00/hypertile). Moonlight remains the video
-client and Sunshine remains the remote host. This project will manage computer
-profiles, connection lifecycle, host display recovery, and user controls.
+client and Sunshine remains the remote host. This project manages computer profiles, connection lifecycle, host display
+recovery, and user controls.
 
-## Planned behavior
+## Implemented behavior
 
 - Launch a saved computer/profile from a desktop entry or command.
 - Reuse an existing connection when the same target is opened again.
 - Keep remote windows independent of any layout or workspace assignment.
 - Provide connection status, reconnect, disconnect, and display restoration.
 - Preserve Moonlight pairing and existing host authentication.
-- Offer a standalone computer/settings window and, optionally, an Omarchy bar plugin.
+- Offer a standalone computer/settings window with discovery and guided setup.
+
+Installable packaging and an optional Omarchy bar plugin remain planned.
 
 Hypertile Scenes uses generic application launch and window matching.
 Hypertile owns placement; Remote Desktops owns connections.
@@ -71,6 +73,9 @@ cargo test --locked
 cargo build --locked
 python3 -m unittest discover -s tests -v
 python3 tests/integration.py -v
+cmake -S ui -B build/ui -DCMAKE_BUILD_TYPE=Release
+cmake --build build/ui --parallel 2
+ctest --test-dir build/ui --output-on-failure
 ```
 
 GitHub Actions tests the Rust/Linux backend, Python host recovery, and the
@@ -78,6 +83,8 @@ Windows PowerShell display policy on its native runner. Integration tests use
 isolated fake clients and hosts; they do not establish real streaming performance.
 See [architecture](docs/ARCHITECTURE.md) and [source provenance](docs/PROVENANCE.md).
 Initial local measurements and their limits are in [validation](docs/VALIDATION.md).
+The [2026-09-07 audit](docs/AUDIT.md) records verified fixes, test results, and
+remaining limitations.
 
 ## License
 

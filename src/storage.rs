@@ -79,6 +79,11 @@ pub fn lock(path: &Path, nonblocking: bool) -> Result<File> {
     }
     Ok(file)
 }
+pub fn lock_contended(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+}
 pub fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&fs::read(path).with_context(|| format!("read {}", path.display()))?)
         .context("invalid state JSON")

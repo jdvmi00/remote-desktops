@@ -46,7 +46,8 @@ synthetic. `--state` supports `idle`, `connecting`, `preflight`, `running`,
 computers), and `unconfigured` (a removed computer with a pending restore).
 `--dialog` opens `help`, `preferences`, `details`, `remove`, `notice`, or `error`.
 `--setup-preview` accepts `computer`, `pair`, `preferences`, `recovery`
-(macOS with BetterDisplay), `windows`, `advanced`, and `check`. `--compact`
+(macOS with BetterDisplay), `windows`, `matching` (verified Windows matching),
+`advanced`, and `check`. `--compact`
 renders the minimum window size. With an offscreen platform,
 `--screenshot /tmp/manager.png` exports the rendered demo. These preview and
 screenshot options require `--demo`.
@@ -183,7 +184,10 @@ host resolution or a connection failure. Existing profiles are preserved.
 Verified matching (SSH) is optional. Inspect the PC pins Sunshine's configured
 output. Refit in this mode requires recent evidence of the selected output and
 requested host resolution. Missing displays and mismatched captures report an
-error. Managing Virtual Display Driver sizes is a separate unchecked option.
+error. Managing Virtual Display Driver sizes is a separate unchecked option. It adds
+missing size/refresh combinations persistently, preserves existing entries, and
+requires a successful driver reload. Display restoration does not remove these
+added configuration entries.
 Other platforms default to Use existing host display. Mac display management
 and Windows console recovery retain their existing SSH requirements.
 
@@ -198,7 +202,8 @@ system, quality, mouse, and audio in plain language. Save requires a passing
 check of the current draft; editing any field invalidates it. Escape or Cancel
 with unsaved changes asks before discarding.
 
-New profiles use the host's existing display and automatic decoder selection.
+New Windows profiles request display matching through Sunshine; other platforms
+use the host's existing display. All new profiles use automatic decoder selection.
 Advanced controls expose resolution, frame rate, bitrate in Mbit/s, codec,
 mouse mode (direct or relative pointer), and audio (play here and mute when
 unfocused, always play here, or play here and on the host), each with a one-line
@@ -213,7 +218,9 @@ Mac's current main display mode, or the capture display's size on Windows.
 Enable manual Refit opens each connection at its last remembered stream size.
 Refit explicitly restarts at the current window size. Verified matching also
 checks host capture afterwards. The connection view labels requested stream size, negotiated
-video size, and verified host display size separately. Host display size is
+video size, and verified host display size separately. Verified matching currently rereads a bounded log segment from launch: more
+than 128 KiB or 65,536 characters revokes verification and requires reconnecting,
+so a long or noisy session can hit this limit. Host display size is
 shown as Host resolution unverified without recent launch-scoped Sunshine evidence; a client
 stream size alone never earns a “fits the window” label.
 

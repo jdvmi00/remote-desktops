@@ -58,6 +58,15 @@ try {
     reply = windows_display.powershell(alias, script, timeout=20)
     if not reply.get('ok'):
         raise ValueError(reply.get('error', 'display verification failed'))
+    # Keep the same bound at the helper boundary, including malformed replies.
+    # The cursor deliberately remains launch-scoped until an incremental parser
+    # can retain identity and revoke stale capture evidence across chunks.
+    end = reply.get('offset')
+    text = reply.get('text', '')
+    if (type(end) is not int or end < 0 or not isinstance(text, str)
+            or len(text) > 65536
+            or (cursor and (end < offset or end - offset > 131072))):
+        raise ValueError('display-verification-lost: Sunshine log exceeded the observation bound or changed; reconnect to verify')
     options = reply['options']
     if output_id(options.get('output_name')) != expected:
         raise ValueError('capture-display-changed: Sunshine no longer selects the configured display')

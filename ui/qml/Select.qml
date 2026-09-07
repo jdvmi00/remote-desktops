@@ -15,7 +15,7 @@ ComboBox {
         verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
     }
     indicator: Icon {
-        name: "chevron-down"; size: 16
+        glyph: "chevron-down"; size: 16
         x: control.width - width - 13; y: (control.height - height) / 2
         color: control.enabled ? theme.colors.secondary : theme.colors.disabledText
     }

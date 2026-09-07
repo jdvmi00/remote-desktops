@@ -165,6 +165,118 @@ class BackendTests(unittest.TestCase):
         self.wait(lambda: launches.exists() and str(pid) in [line.split()[0] for line in launches.read_text().splitlines()])
         return pid
 
+    def test_remove_refuses_helper_and_launch_locks_online_and_offline(self):
+        self.connect()
+        self.cli("disconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "idle")
+        for offline in (False, True):
+            if offline:
+                self.stop_daemon()
+            for filename in ("recovery.lock", "gate.lock"):
+                with self.subTest(offline=offline, lock=filename):
+                    with (self.session() / filename).open("a") as lock:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        result = self.cli("settings", "remove", "laptop", check=False)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertTrue((self.session() / "session.json").exists())
+                        config = self.root / "config/remote-desktops/computers.json"
+                        self.assertIn("laptop", json.loads(config.read_text())["computers"])
+            if offline:
+                self.start()
+        self.cli("settings", "remove", "laptop")
+        self.assertFalse(self.session().exists())
+
+    def test_failed_session_retirement_preserves_visible_record(self):
+        self.connect()
+        self.cli("disconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "idle")
+        self.state.chmod(0o500)
+        try:
+            result = self.cli("settings", "remove", "laptop", check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(self.cli("status", "laptop")["phase"], "idle")
+            self.assertTrue((self.session() / "session.json").exists())
+        finally:
+            self.state.chmod(0o700)
+        self.cli("settings", "remove", "laptop")
+
+    def test_offline_remove_refuses_a_live_supervisor(self):
+        self.connect()
+        self.cli("disconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "idle")
+        self.stop_daemon()
+        token = "a" * 32
+        child = subprocess.Popen(["sleep", "60"], env={**self.env, "REMOTE_DESKTOPS_TOKEN": token})
+        path = self.session() / "session.json"
+        record = json.loads(path.read_text())
+        record["token"] = token
+        path.write_text(json.dumps(record))
+        (self.session() / f"job-{token}.json").write_text(json.dumps({
+            "token": token, "supervisor": child.pid, "pid": None,
+            "ended": False, "success": False, "evidence": {}}))
+        try:
+            result = self.cli("settings", "remove", "laptop", check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Disconnect", result.stderr)
+            self.assertTrue(path.exists())
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+        self.start()
+
+    def test_held_session_gate_keeps_other_commands_responsive(self):
+        self.connect()
+        self.connect("other")
+        with (self.session() / "gate.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            pending = subprocess.Popen([str(BIN), "--json", "disconnect", "laptop"],
+                                       env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                time.sleep(.15)
+                self.assertIsNone(pending.poll())
+                start = time.monotonic()
+                self.assertTrue(self.cli("status", "laptop")["desired"])
+                self.assertFalse(self.cli("disconnect", "other")["desired"])
+                self.assertLess(time.monotonic() - start, 1)
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                stdout, stderr = pending.communicate(timeout=5)
+            self.assertEqual(pending.returncode, 0, stderr)
+            self.assertFalse(json.loads(stdout)["desired"])
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "idle")
+
+    def test_sunshine_fixed_size_connects_without_compositor(self):
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        value["computers"]["laptop"]["profiles"]["desktop"].update(
+            display={"adapter": "sunshine"}, stream_resolution="1600x900")
+        config.write_text(json.dumps(value))
+        self.connect()
+        result = self.cli("status", "laptop")
+        self.assertEqual(result["phase"], "running")
+        self.assertEqual(result["resolution"], "1600x900")
+        self.assertFalse(result["refit_available"])
+        self.assertNotEqual(self.cli("refit", "laptop", check=False).returncode, 0)
+        self.assertIn("1600x900", (self.session() / "launches").read_text())
+
+    def test_forget_and_concurrent_connect_preserve_new_session(self):
+        # Large retired directory makes cleanup overlap the other request;
+        # only the detached tombstone may be deleted during that overlap.
+        self.connect()
+        self.cli("disconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "idle")
+        for n in range(1500):
+            (self.session() / f"synthetic-old-{n}").touch()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
+            stream.connect(str(self.root / "runtime/remote-desktops/control.sock"))
+            stream.sendall(b'{"command":"forget","computer":"laptop"}\n')
+            self.cli("connect", "laptop")
+            self.assertTrue(json.loads(stream.recv(10000))["ok"])
+        self.connect()
+        self.assertTrue((self.session() / "session.json").exists())
+        self.assertTrue((self.session() / "recovery.json").exists())
+        self.assertTrue(self.cli("status", "laptop")["desired"])
+
     def test_repeat_connect_and_daemon_restart_reuse_the_same_client(self):
         pid = self.connect()
         first = self.cli("status", "laptop")["generation"]
@@ -551,6 +663,45 @@ class BackendTests(unittest.TestCase):
         self.cli("window-rule", "remove")
         self.assertIn("fullscreen = false", config.read_text())
 
+    def test_window_rule_rejects_malformed_blocks_without_writing(self):
+        config = self.root / "config/hypr/hyprland.lua"
+        config.parent.mkdir(parents=True)
+        begin = "-- remote-desktops: begin (managed; change with `remote-desktops window-rule`)"
+        end = "-- remote-desktops: end"
+        for malformed in (f"before\n{begin}\nkeep this", f"{begin}\n{begin}\n{end}\n", f"{end}\nkeep this"):
+            for action in ("install", "remove"):
+                with self.subTest(malformed=malformed, action=action):
+                    config.write_text(malformed)
+                    result = self.cli("window-rule", action, check=False)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("malformed managed window rule", result.stderr)
+                    self.assertEqual(config.read_text(), malformed)
+        self.assertFalse(config.with_suffix(".lua.remote-desktops.bak").exists())
+
+    def test_window_rule_rolls_back_failed_validation_and_preserves_external_edits(self):
+        config = self.root / "config/hypr/hyprland.lua"
+        config.parent.mkdir(parents=True)
+        original = 'dofile("boot.lua")\n'
+        config.write_text(original)
+        self.fake_desktop()
+        shim = self.root / "helpers/bin/hyprctl"
+        for failure in ("reload", "query", "parse", "external"):
+            with self.subTest(failure=failure):
+                config.write_text(original)
+                shim.write_text("#!/usr/bin/env python3\nimport sys\nfrom pathlib import Path\n"
+                                f"config=Path({str(config)!r}); original={original!r}; failure={failure!r}\n"
+                                "changed=config.read_text()!=original\n"
+                                "if sys.argv[-1]=='reload' and changed and failure=='reload': sys.exit(1)\n"
+                                "if sys.argv[-1]=='configerrors' and changed:\n"
+                                " if failure=='external': config.write_text(original+'-- concurrent user edit\\n'); sys.exit(1)\n"
+                                " if failure=='query': sys.exit(1)\n"
+                                " if failure=='parse': print('new parse error')\n")
+                result = self.cli("window-rule", "install", check=False)
+                self.assertNotEqual(result.returncode, 0)
+                expected = original + "-- concurrent user edit\n" if failure == "external" else original
+                self.assertEqual(config.read_text(), expected)
+                self.assertIn("not overwritten" if failure == "external" else "undone", result.stderr)
+
     def test_fit_window_needs_the_compositor(self):
         config = self.root / "config/remote-desktops/computers.json"
         value = json.loads(config.read_text())
@@ -774,7 +925,15 @@ class SettingsTests(unittest.TestCase):
         self.cli("save", draft=self.draft())
         directory = self.root / "state/remote-desktops/sessions/home"
         directory.mkdir(parents=True)
-        (directory / "session.json").write_text(json.dumps({"desired": False, "phase": "idle", "config": {"pairing_uuid": self.uuid}}))
+        # Use a complete persisted Session: offline removal applies the same
+        # ownership validation as the daemon, including supervisor identity.
+        (directory / "session.json").write_text(json.dumps({
+            "version": 1, "computer": "home", "profile": "desktop",
+            "config": {"pairing_uuid": self.uuid}, "settings": {},
+            "desired": False, "phase": "idle", "generation": 1, "token": None,
+            "reconnect": False, "error": None, "argv": [], "client_version": "unknown",
+            "attempts": 0, "next_retry": 0, "closing_at": None,
+            "launched_at": 0, "window": None, "evidence": {}}))
         (directory / "recovery.json").write_text(json.dumps({"journal": {"output": {"original": "1"}}}))
         self.assertIn("restore", self.cli("remove", "home", ok=False))
         self.assertIn("home", json.loads(self.config.read_text())["computers"])
@@ -796,7 +955,7 @@ class SettingsTests(unittest.TestCase):
         (bindir / "tailscale").write_text("#!/bin/sh\ncat <<'EOF'\n" + json.dumps({"Peer": {"a": {
             "HostName": "Garage PC", "DNSName": "garage.tail.ts.net.", "OS": "windows", "Online": True, "TailscaleIPs": ["100.9.9.9"]}}}) + "\nEOF\n")
         (bindir / "tailscale").chmod(0o700)
-        (bindir / "avahi-browse").write_text("#!/bin/sh\nprintf '%s\\n' '=;e;IPv4;Home\\032PC;_nvstream._tcp;local;home-pc.local;192.168.1.2;47989;'\n")
+        (bindir / "avahi-browse").write_text("#!/bin/sh\nprintf '%s\\n' '=;e;IPv4;Home\\032PC;_nvstream._tcp;local;home.example.net;192.168.1.2;47989;'\n")
         (bindir / "avahi-browse").chmod(0o700)
         found = self.cli("discover")
         self.assertEqual([c["name"] for c in found["candidates"]], ["Garage PC", "Home PC"])

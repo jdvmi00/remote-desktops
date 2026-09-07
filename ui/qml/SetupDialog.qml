@@ -13,6 +13,8 @@ Sheet {
     onEscapeRequested: requestClose()
     title: editing ? "Computer settings" : pairing ? "Pair a computer" : "Add a computer"
     topPadding: 0
+    property string editingComputer: ""
+    property string discoveryWarning: ""
     property bool editing: false
     property int step: 0
     property var draft: ({})
@@ -102,6 +104,7 @@ Sheet {
     readonly property var summaryRows: [["Name", draft.name || ""], ["Address", draft.host || ""], ["Operating system", ({macos: "macOS", windows: "Windows", linux: "Linux"})[draft.platform] || "Not specified"], ["Quality", summary()], ["Mouse", valueLabel(inputs, draft.input || "absolute")], ["Audio", valueLabel(audios, draft.audio || "focus")], ["Host display", recoverySummary()]]
     function begin(computer) {
         if (manager.setupBusy) return
+        editingComputer = computer; discoveryWarning = ""
         editing = !!computer; step = editing ? 1 : 0; draft = {}; paired = []; discovered = []; inspection = null
         error = ""; errorAction = ""; tested = false; loaded = false; advanced = false; edited = false; attempted = false; touched = {}
         pairing = false; pin = ""; pairTarget = {}; discovering = !editing
@@ -115,8 +118,22 @@ Sheet {
         if (dirty) discard.ask("Discard changes?", editing ? "Your edits to this computer will not be saved." : "This computer will not be added. You can add it again at any time.", "Discard", function() { setup.close() })
         else close()
     }
+    function inspectionSubject(value) {
+        const d = value.display || {}
+        return JSON.stringify([value.host, value.platform, value.ssh || {}, d.adapter, d.output, d.settings])
+    }
     function set(key, value) {
-        const next = Object.assign({}, draft); next[key] = value; draft = next
+        const previous = inspectionSubject(draft)
+        const next = Object.assign({}, draft); next[key] = value
+        if (previous !== inspectionSubject(next)) {
+            inspection = null
+            // A new host identity cannot inherit a display selected on the old host.
+            if (key === "host" || key === "platform" || key === "ssh") {
+                next.display = Object.assign({}, next.display || {})
+                for (const field of ["uuid", "mode", "device_id", "output"]) delete next.display[field]
+            }
+        }
+        draft = next
         const t = Object.assign({}, touched); t[key] = true; touched = t
         tested = false; error = ""; edited = true
     }
@@ -159,7 +176,7 @@ Sheet {
         manager.setup("inspect", {computer: draft.computer, pairing_uuid: draft.pairing_uuid, host: draft.host, platform: platform, ssh: ssh, adapter: adapter, display: display})
     }
     function installHelper() {
-        if (manager.setupBusy) return
+        if (manager.setupBusy || !inspection || !display.device_id) return
         error = ""
         manager.setup("install-helper", {computer: draft.computer, pairing_uuid: draft.pairing_uuid, host: draft.host, platform: platform, ssh: ssh, device_id: display.device_id})
     }
@@ -176,8 +193,16 @@ Sheet {
     }
     function reload() {
         error = ""
-        if (editing) { loaded = false; tested = false; manager.setup("get", {computer: draft.computer}) }
+        if (editing) { loaded = false; tested = false; manager.setup("get", {computer: editingComputer}) }
         else manager.setup("catalog")
+    }
+    function retryRead() {
+        if (manager.setupBusy) return
+        const action = errorAction
+        error = ""; errorAction = ""
+        if (action === "get") manager.setup("get", {computer: editingComputer})
+        else if (action === "discover") { discovering = true; discoveryWarning = ""; manager.setup("discover") }
+        else { discovering = true; manager.setup("catalog") }
     }
     function reveal(item) {
         const flick = scroll.contentItem
@@ -190,22 +215,29 @@ Sheet {
         target: manager
         function onSetupFinished(action, ok, result, message) {
             if (!setup.visible) return
-            if (action === "discover") { setup.discovering = false; if (ok) setup.discovered = result.candidates || []; return }
-            if (!ok) { setup.error = message; setup.errorAction = action; return }
+            if (action === "discover") {
+                setup.discovering = false
+                if (ok) {
+                    setup.discovered = result.candidates || []
+                    setup.discoveryWarning = (result.warnings || []).join("\n")
+                    setup.error = ""; setup.errorAction = ""
+                } else { setup.error = message; setup.errorAction = action }
+                return
+            }
+            if (!ok) { if (action === "catalog") setup.discovering = false; setup.error = message; setup.errorAction = action; return }
             setup.error = ""; setup.errorAction = ""
             if (action === "catalog") {
                 setup.paired = result.paired; setup.revision = result.revision; setup.loaded = true
                 if (setup.step > 0) { const next = Object.assign({}, setup.draft); next.revision = result.revision; setup.draft = next }
                 else if (setup.discovering) manager.setup("discover")
             }
-            if (action === "get") { setup.draft = result; setup.loaded = true; setup.edited = false }
+            if (action === "get") { setup.inspection = null; setup.draft = result; setup.loaded = true; setup.edited = false }
             if (action === "pair") {
                 setup.revision = result.revision || setup.revision
                 const p = result.paired
                 setup.choose({name: p.name, host: p.host || setup.pairTarget.host, pairing_uuid: p.pairing_uuid}, setup.pairTarget.platform)
             }
             if (action === "inspect") {
-                setup.inspection = result
                 // Preselect the obvious candidate so the form reads as complete.
                 const list = result.displays || []
                 if (setup.adapter === "betterdisplay" && !setup.display.uuid) {
@@ -219,6 +251,7 @@ Sheet {
                     const d = list.find(x => x.available && !x.internal && !x.active) || list.find(x => x.available && !x.internal) || list[0]
                     if (d) setup.setNested("display", "device_id", d.id)
                 }
+                setup.inspection = result
                 revealLater.start()
             }
             if (action === "install-helper") setup.inspectHost()
@@ -425,7 +458,7 @@ Sheet {
                         }
                     }
                 }
-                Body { visible: setup.loaded && !setup.discovering && !setup.discovered.length; text: "Nothing was found. Enter the computer's address below." ; font.pointSize: theme.type.caption }
+                Body { visible: setup.loaded && !setup.discovering && !setup.discovered.length && setup.errorAction !== "discover" && !setup.discoveryWarning; text: "Nothing was found. Enter the computer's address below." ; font.pointSize: theme.type.caption }
                 RowLayout {
                     visible: setup.loaded
                     Layout.fillWidth: true; spacing: 8
@@ -434,6 +467,7 @@ Sheet {
                 }
                 Hint { visible: setup.loaded; text: "The host needs Sunshine running. Tailscale names, local names, and IP addresses all work." }
             }
+            Hint { text: setup.discoveryWarning; visible: setup.step === 0 && setup.discoveryWarning.length > 0; color: theme.colors.warning }
             // Step: name, address, quality, and display recovery.
             ColumnLayout {
                 visible: setup.step === 1 && setup.loaded
@@ -543,7 +577,7 @@ Sheet {
                     RowLayout {
                         Layout.topMargin: 4; spacing: 8
                         ActionButton { objectName: "setupInspect"; text: setup.inspection ? "Inspect again" : "Inspect the PC"; icon.source: "qrc:/qml/icons/monitor.svg"; enabled: !manager.setupBusy && !setup.sshAliasError && (setup.adapter !== "virtual" || (setup.ssh.alias || "").length > 0); onClicked: setup.inspectHost() }
-                        ActionButton { objectName: "setupInstall"; visible: setup.adapter === "windows" && !!(setup.inspection && setup.inspection.helper && !setup.inspection.helper.installed); text: "Install the helper"; icon.source: "qrc:/qml/icons/play.svg"; enabled: !manager.setupBusy && !!setup.display.device_id; hint: "Installs the recovery helper on the PC over SSH; needs an administrator account"; onClicked: setup.installHelper() }
+                        ActionButton { objectName: "setupInstall"; visible: setup.adapter === "windows" && !!(setup.inspection && setup.inspection.helper && !setup.inspection.helper.installed); text: "Install the helper"; icon.source: "qrc:/qml/icons/play.svg"; enabled: !manager.setupBusy && !!setup.inspection && !!setup.display.device_id; hint: "Installs the recovery helper on the PC over SSH; needs an administrator account"; onClicked: setup.installHelper() }
                     }
                     Hint { visible: !setup.inspection && !setup.attempted; text: setup.adapter === "virtual" ? "Inspect the PC to read the virtual display's size list and Sunshine's display options." : "Inspect the PC to list its displays, Sunshine's capture output, and whether the helper is installed." }
                     Problem { text: setup.attempted ? setup.displayError : "" }
@@ -645,7 +679,8 @@ Sheet {
                 Hint { Layout.topMargin: 8; text: setup.editing ? "Changes apply after disconnecting and starting a new connection." : "You can tune stream quality and recovery later from Edit." }
             }
             ColumnLayout {
-                visible: setup.step === 1 && !setup.loaded
+                objectName: "setupLoadingSettings"
+                visible: setup.step === 1 && !setup.loaded && manager.setupBusy
                 Layout.fillWidth: true; spacing: 10
                 Body { text: "Loading settings…" }
                 Progress { active: parent.visible }
@@ -717,11 +752,10 @@ Sheet {
             anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 12; spacing: 10
             Icon { glyph: "alert"; size: 16; color: theme.colors.warning }
             Body { text: setup.error; color: theme.colors.warning; font.pointSize: theme.type.caption }
+            ActionButton { objectName: "setupReadRetry"; visible: ["catalog", "get", "discover"].indexOf(setup.errorAction) >= 0; enabled: !manager.setupBusy; text: "Try again"; onClicked: setup.retryRead() }
             ActionButton { visible: setup.conflict; quiet: true; text: "Reload"; onClicked: setup.reload() }
         }
     }
-    // The test button is always present so keyboard users and tests can reach it.
-    ActionButton { objectName: "setupTest"; visible: false; text: "Check again"; onClicked: setup.check() }
     footer: Sheet.Footer {
         ActionButton { text: "Cancel"; enabled: !manager.setupBusy; onClicked: setup.requestClose() }
         ActionButton { visible: setup.step === 0 && !setup.pairing; quiet: true; icon.source: "qrc:/qml/icons/refresh.svg"; text: "Refresh list"; enabled: !manager.setupBusy; onClicked: { setup.discovering = true; manager.setup("catalog") } }

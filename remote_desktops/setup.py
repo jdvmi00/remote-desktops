@@ -1,6 +1,7 @@
 """Setup-time operations: discovery, Moonlight pairing, and host inspection.
 
-None of these start a stream, change a host display, or write recovery state.
+Discovery, pairing and inspection never start streams or change host displays.
+Explicit helper installation changes Sunshine configuration and restarts its service.
 Pairing is delegated to Moonlight's own command line so certificates and the
 client identity stay in Moonlight's configuration.
 """
@@ -20,13 +21,22 @@ def _run(argv, timeout):
     return subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
 
 
-def tailscale_peers(timeout=5):
+def tailscale_peers(timeout=5, warnings=None):
     """Peers from the local tailscale daemon; only platforms that can run Sunshine."""
     if not shutil.which("tailscale"):
+        if warnings is not None:
+            warnings.append("Tailscale discovery unavailable: tailscale is not installed.")
         return []
     try:
-        data = json.loads(_run(["tailscale", "status", "--json"], timeout).stdout)
+        result = _run(["tailscale", "status", "--json"], timeout)
+        if result.returncode:
+            raise ValueError("discovery failed")
+        data = json.loads(result.stdout)
+        if not isinstance(data, dict) or not isinstance(data.get("Peer") or {}, dict):
+            raise ValueError("invalid discovery reply")
     except (OSError, ValueError, subprocess.TimeoutExpired):
+        if warnings is not None:
+            warnings.append("Tailscale discovery failed. Check that Tailscale is running and retry.")
         return []
     peers = []
     for peer in (data.get("Peer") or {}).values():
@@ -41,13 +51,20 @@ def tailscale_peers(timeout=5):
     return peers
 
 
-def lan_hosts(timeout=4):
+def lan_hosts(timeout=4, warnings=None):
     """Sunshine hosts announcing _nvstream._tcp on the local network."""
     if not shutil.which("avahi-browse"):
+        if warnings is not None:
+            warnings.append("LAN discovery unavailable: avahi-browse is not installed.")
         return []
     try:
-        out = _run(["avahi-browse", "-rtp", "_nvstream._tcp"], timeout + 3).stdout
-    except (OSError, subprocess.TimeoutExpired):
+        result = _run(["avahi-browse", "-rtp", "_nvstream._tcp"], timeout + 3)
+        if result.returncode:
+            raise ValueError("discovery failed")
+        out = result.stdout
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        if warnings is not None:
+            warnings.append("LAN discovery failed. Check that Avahi is running and retry.")
         return []
     found = {}
     for line in out.splitlines():
@@ -67,24 +84,24 @@ def lan_hosts(timeout=4):
 
 def discover():
     paired = {key: h for key, h in moonlight_hosts().items() if h["paired"]}
-    candidates = []
-    for entry in tailscale_peers() + lan_hosts():
-        addresses = {a.lower() for a in entry["addresses"]}
-        # Tailscale and LAN can report the same machine; merge by short name.
-        short = entry["host"].split(".")[0].lower()
-        existing = next((c for c in candidates if c["host"].split(".")[0].lower() == short
-                         or c["name"].lower() == entry["name"].lower()), None)
-        if existing:
-            existing["addresses"] = existing["addresses"] + [a for a in entry["addresses"] if a not in existing["addresses"]]
-            existing["online"] = existing["online"] or entry["online"]
-            existing["platform"] = existing["platform"] or entry["platform"]
-            continue
-        entry["pairing_uuid"] = next((key for key, h in paired.items()
-                                      if (h["address"] or "").lower() in addresses
-                                      or (h["name"] or "").lower() in (entry["name"].lower(), short)), None)
+    candidates, warnings = [], []
+    normalize = lambda address: address.rstrip(".").lower()
+    for entry in tailscale_peers(warnings=warnings) + lan_hosts(warnings=warnings):
+        addresses = {normalize(a) for a in entry["addresses"]}
+        matches = [c for c in candidates if addresses.intersection(normalize(a) for a in c["addresses"])]
+        # Names are labels, not identity. Merge all address-connected observations.
+        for existing in matches:
+            entry["addresses"] += [a for a in existing["addresses"] if normalize(a) not in {normalize(v) for v in entry["addresses"]}]
+            entry["online"] = entry["online"] or existing["online"]
+            entry["platform"] = entry["platform"] or existing["platform"]
+            candidates.remove(existing)
         candidates.append(entry)
+    for entry in candidates:
+        addresses = {normalize(a) for a in entry["addresses"]}
+        identities = [key for key, h in paired.items() if normalize(h["address"] or "") in addresses]
+        entry["pairing_uuid"] = identities[0] if len(identities) == 1 else None
     candidates.sort(key=lambda c: (not c["online"], c["name"].lower()))
-    return {"candidates": candidates}
+    return {"candidates": candidates, "warnings": warnings}
 
 
 def moonlight_gui_running():
