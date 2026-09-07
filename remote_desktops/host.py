@@ -13,7 +13,7 @@ import socket
 import subprocess
 from .storage import atomic_json, read_json
 from .mac_display import same_setting, manages_mode
-from . import windows_display
+from . import virtual_display, windows_display
 
 NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
 UUID = re.compile(r"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}\Z")
@@ -31,7 +31,9 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def resolution(value):
+def resolution(value, allow_auto=False):
+    if allow_auto and value == "auto":
+        return value  # Fit the window: the daemon resolves the size at launch.
     require(isinstance(value, str) and re.fullmatch(r"\d{3,5}x\d{3,5}", value), "resolution must be WIDTHxHEIGHT")
     require(all(240 <= int(n) <= 16384 for n in value.split("x")), "resolution outside supported range")
     return value
@@ -64,7 +66,7 @@ def configuration_value(value):
         require("default_profile" not in computer or computer["default_profile"] in computer["profiles"], "unknown default profile")
         for profile_name, p in computer["profiles"].items():
             require(NAME.fullmatch(profile_name), "invalid profile ID")
-            resolution(p.get("stream_resolution"))
+            resolution(p.get("stream_resolution"), allow_auto=True)
             require(type(p.get("fps", 60)) is int and 20 <= p.get("fps", 60) <= 240, "invalid FPS")
             require(type(p.get("bitrate", 60000)) is int and 1000 <= p.get("bitrate", 60000) <= 200000, "invalid bitrate")
             require(p.get("codec", "HEVC") in ("HEVC", "H.264", "AV1", "auto"), "invalid codec")
@@ -77,7 +79,20 @@ def configuration_value(value):
             for flag in ("hdr", "yuv444"):
                 require(type(p.get(flag, False)) is bool, "invalid " + flag)
             display = p.get("display", {"adapter": "external"})
-            require(display.get("adapter") in ("external", "betterdisplay", "macos", "windows"), "unknown display adapter")
+            require(display.get("adapter") in ("external", "betterdisplay", "macos", "windows", "virtual", "sunshine"), "unknown display adapter")
+            if display["adapter"] == "sunshine":
+                require(computer.get("platform") == "windows", "Sunshine matching requires platform=windows")
+            if display["adapter"] == "virtual":
+                require(computer.get("platform") == "windows", "virtual display adapter requires platform=windows")
+                alias = computer.get("ssh", {}).get("alias")
+                require(alias is None or windows_display.ALIAS.fullmatch(alias), "invalid ssh.alias")
+                virtual_display.settings_path(display)
+                require(type(display.get("sync_modes", False)) is bool, "sync_modes must be boolean")
+                if "initial_resolution" in display:
+                    resolution(display["initial_resolution"])
+                if "output" in display:
+                    from .sunshine_display import output_id
+                    output_id(display["output"])
             if display["adapter"] == "windows":
                 require(computer.get("platform") == "windows", "Windows display adapter requires platform=windows")
                 require(windows_display.ALIAS.fullmatch(computer.get("ssh", {}).get("alias", "")), "Windows adapter requires an approved ssh.alias")
@@ -174,6 +189,12 @@ class Host:
             info["moonlight_saved_address"] = known["address"]
         if self.display["adapter"] == "external":
             return {**info, "restoration": "externally-managed", "display": "externally-managed"}
+        if self.display["adapter"] == "sunshine":
+            return {**info, "restoration": "sunshine", "host_display": {"verified": False}, "display": "host resolution unverified"}
+        if self.display["adapter"] == "virtual":
+            from . import sunshine_display
+            sunshine_display.snapshot(self)
+            return {**info, "restoration": "sunshine", "display": "capture verification pending"}
         observed = self.remote("probe")
         if self.display["adapter"] == "windows":
             require(not observed.get("error"), observed.get("error", "Windows display helper error"))
@@ -194,8 +215,10 @@ class Host:
 
 
 def prepare(record, host, persist):
-    if host.display["adapter"] == "external":
+    if host.display["adapter"] in ("external", "sunshine"):
         return
+    if host.display["adapter"] == "virtual":
+        return virtual_display.prepare(record, host, persist)
     if host.display["adapter"] == "windows":
         return windows_display.prepare(record, host, persist)
     observed = host.probe(pairing=False)
@@ -270,6 +293,8 @@ def prepare(record, host, persist):
 
 
 def restore(record, host, persist, fields=("mode", "output")):
+    if host.display["adapter"] in ("virtual", "sunshine"):
+        return True  # Sunshine reverts the display itself when the session ends.
     if host.display["adapter"] == "windows":
         return windows_display.restore(record, host, persist)
     journal = record.get("journal", {})
@@ -312,11 +337,17 @@ def restore(record, host, persist, fields=("mode", "output")):
     return not journal
 
 
-def stream_argv(computer, p):
-    return ["moonlight", "stream", "--resolution", p["stream_resolution"], "--fps", str(p.get("fps", 60)),
+def stream_argv(computer, p, fitted=None):
+    size = fitted or p["stream_resolution"]
+    require(size != "auto", "resolution-required: the window size was not resolved before launch")
+    # Sunshine requires the client optimization flag to apply its automatic
+    # display resolution. Other adapters retain ownership of their host modes.
+    follows_stream = computer.get("platform") == "windows" and p.get("display", {}).get("adapter") in ("virtual", "sunshine")
+    return ["moonlight", "stream", "--resolution", resolution(size), "--fps", str(p.get("fps", 60)),
             "--bitrate", str(p.get("bitrate", 60000)), "--display-mode", "windowed",
             "--absolute-mouse" if p.get("input", "absolute") == "absolute" else "--no-absolute-mouse",
-            "--capture-system-keys", p.get("system_keys", "never"), "--no-quit-after", "--no-game-optimization",
+            "--capture-system-keys", p.get("system_keys", "never"), "--no-quit-after",
+            "--game-optimization" if follows_stream else "--no-game-optimization",
             "--video-codec", p.get("codec", "HEVC"), "--video-decoder", p.get("decoder", "hardware"),
             "--keep-awake" if p.get("keep_awake") == "always" else "--no-keep-awake",
             "--mute-on-focus-loss" if p.get("audio", "focus") == "focus" else "--no-mute-on-focus-loss",

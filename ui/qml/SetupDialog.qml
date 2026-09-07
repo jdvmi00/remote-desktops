@@ -42,45 +42,64 @@ Sheet {
     readonly property var ssh: draft.ssh || ({})
     readonly property var display: draft.display || ({adapter: "external"})
     readonly property string adapter: display.adapter || "external"
-    readonly property bool managed: adapter !== "external"
+    readonly property bool managed: adapter !== "external" && adapter !== "sunshine"
     readonly property bool recoverable: platform === "macos" || platform === "windows"
     readonly property string nameError: (draft.name || "").trim().length > 0 ? "" : "Enter a name for this computer."
     readonly property string hostError: /^[A-Za-z0-9][A-Za-z0-9.:-]{0,252}$/.test(draft.host || "") ? "" : "Enter a hostname or IP address using letters, digits, dots, colons, or dashes."
-    readonly property string resolutionError: /^[0-9]{3,5}x[0-9]{3,5}$/.test(draft.stream_resolution || "") ? "" : "Use WIDTHxHEIGHT, for example 2560x1440."
+    readonly property bool matchingConfigured: adapter === "virtual" && !!display.output && !!(ssh.alias || "")
+    readonly property bool fitsWindow: draft.stream_resolution === "auto"
+    readonly property string resolutionError: fitsWindow || /^[0-9]{3,5}x[0-9]{3,5}$/.test(draft.stream_resolution || "") ? "" : "Use WIDTHxHEIGHT, for example 2560x1440."
     readonly property string sshUserError: !managed || platform !== "macos" ? "" : /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(ssh.user || "") ? "" : "Enter the Mac's approved SSH user (letters, digits, dashes, underscores)."
-    readonly property string sshAliasError: !managed || platform !== "windows" ? "" : /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(ssh.alias || "") ? "" : "Enter the SSH alias for this PC from your ~/.ssh/config."
+    readonly property string sshAliasError: !managed || platform !== "windows" || (adapter === "virtual" && !(ssh.alias || "").length) ? "" : /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(ssh.alias || "") ? "" : "Enter the SSH alias for this PC from your ~/.ssh/config."
     readonly property string displayError: adapter === "betterdisplay" && !(display.uuid && display.mode) ? "Read the Mac's displays and choose a display and mode."
+        : adapter === "virtual" && !matchingConfigured ? "Inspect the PC to select and verify Sunshine display matching, or use the existing host display."
         : adapter === "windows" && !display.device_id ? "Inspect the PC and choose the capture display." : ""
     readonly property bool valid: loaded && !nameError && !hostError && !resolutionError && !sshUserError && !sshAliasError && !displayError
     readonly property var presets: [{label: "Balanced · 1080p, 60 fps", res: "1920x1080", bitrate: 30000}, {label: "Sharper · 1440p, 60 fps", res: "2560x1440", bitrate: 45000}, {label: "Detailed · 4K, 60 fps", res: "3840x2160", bitrate: 80000}, {label: "Custom", res: "", bitrate: 0}]
     readonly property var codecs: [{label: "Automatic", value: "auto"}, {label: "HEVC (H.265)", value: "HEVC"}, {label: "H.264", value: "H.264"}, {label: "AV1", value: "AV1"}]
     readonly property var inputs: [{label: "Direct pointer", value: "absolute", hint: "The pointer lands exactly where you point. Best for desktop work."}, {label: "Relative pointer", value: "relative", hint: "Sends movement only. Needed by games that capture the mouse."}]
-    readonly property var audios: [{label: "Play here, mute when unfocused", value: "focus", hint: "Sound plays on this computer and mutes while the desktop window is not active."}, {label: "Always play here", value: "continuous", hint: "Sound plays on this computer even while the window is in the background."}, {label: "Keep audio on the host", value: "host", hint: "Nothing plays here; the remote computer keeps its sound."}]
+    readonly property var audios: [{label: "Play here, mute when unfocused", value: "focus", hint: "Sound plays on this computer and mutes while the desktop window is not active."}, {label: "Always play here", value: "continuous", hint: "Sound plays on this computer even while the window is in the background."}, {label: "Play here and on the host", value: "host", hint: "Sound plays here even in the background, and host playback stays enabled."}]
     readonly property var adapters: platform === "macos"
-        ? [{label: "Leave the display alone", value: "external", hint: "Streams whatever the Mac shows. Nothing is changed or restored."},
+        ? [{label: "Use existing host display", value: "external", hint: "Streams the existing Mac desktop. Resizing the window scales the picture; this app does not change the host display."},
            {label: "Follow the main display", value: "macos", hint: "Keeps Sunshine capturing the Mac's main display through lid and monitor changes, over SSH. The display mode is never changed."},
            {label: "Manage a display with BetterDisplay", value: "betterdisplay", hint: "Switches a chosen display to a streaming mode and restores it afterwards. Needs BetterDisplay on the Mac."}]
         : platform === "windows"
-        ? [{label: "Leave the display alone", value: "external", hint: "Streams whatever the PC shows. Nothing is changed or restored."},
+        ? [{label: "Match via Sunshine (no SSH)", value: "sunshine", hint: "Requests the saved stream resolution from Sunshine. Enable display configuration and automatic resolution switching in Sunshine on the PC. Refit requests the window size. If the host cannot apply it, the image may be scaled or the connection may fail; host resolution is unverified."},
+           {label: "Use existing host display", value: "external", hint: "Streams the existing PC desktop. Resizing the window scales the picture; this app does not change the host display."},
+           {label: "Verified matching (SSH)", value: "virtual", hint: "Optional: Sunshine changes a selected physical or virtual display to the requested stream size and restores it afterwards. Read-only SSH checks confirm the capture display and resolution. Driver size management is separate and optional."},
            {label: "Managed with the console helper", value: "windows", hint: "A small helper on the PC switches to a virtual capture display for the session and restores the physical displays afterwards, even if this app is offline."}]
-        : [{label: "Leave the display alone", value: "external", hint: ""}]
+        : [{label: "Use existing host display", value: "external", hint: ""}]
     readonly property int presetIndex: {
         const i = ["1920x1080", "2560x1440", "3840x2160"].indexOf(draft.stream_resolution)
         return i >= 0 && draft.fps === 60 && draft.bitrate === presets[i].bitrate && (draft.codec || "auto") === "auto" ? i : 3
     }
     readonly property var displays: inspection && inspection.displays ? inspection.displays : []
+    // Resolutions worth offering: what the inspected display can show first, then common sizes. Any WIDTHxHEIGHT can still be typed.
+    readonly property var resolutions: {
+        const doubled = r => r.split("x").map(v => Number(v) * 2).join("x")
+        const offered = []
+        if (adapter === "betterdisplay" && chosenDisplay) {
+            for (const m of [display.mode].concat(chosenDisplay.modes || []).filter(Boolean)) { if (m.hidpi) offered.push(doubled(m.resolution)); offered.push(m.resolution) }
+        } else if (adapter === "macos") {
+            const main = displays.find(d => d.main) || displays[0]
+            if (main && main.current) { if (main.current.hidpi) offered.push(doubled(main.current.resolution)); offered.push(main.current.resolution) }
+        } else if (adapter === "windows" && chosenDisplay && chosenDisplay.width && chosenDisplay.height) offered.push(chosenDisplay.width + "x" + chosenDisplay.height)
+        return offered.concat(["1920x1080", "2560x1440", "3440x1440", "3840x2160"]).filter((r, i, all) => all.indexOf(r) === i)
+    }
     readonly property var chosenDisplay: displays.find(d => (adapter === "betterdisplay" ? d.uuid === display.uuid : (d.id || "").toLowerCase() === (display.device_id || "").toLowerCase())) || null
     function fieldError(key, message) { return message.length > 0 && (attempted || touched[key] === true) ? message : "" }
     function valueLabel(list, value) { for (const item of list) if (item.value === value) return item.label; return value || "" }
     function modeLabel(m) { return m ? m.resolution + (m.hidpi ? " HiDPI" : "") + " · " + m.refresh + " Hz" : "" }
-    function summary() { return (draft.stream_resolution || "") + " · " + (draft.fps || 60) + " fps · " + Math.round((draft.bitrate || 0) / 1000) + " Mbit/s · " + valueLabel(codecs, draft.codec || "auto") + " codec" }
+    function summary() { return (fitsWindow ? "Saved size with manual Refit" : draft.stream_resolution || "") + " · " + (draft.fps || 60) + " fps · " + Math.round((draft.bitrate || 0) / 1000) + " Mbit/s · " + valueLabel(codecs, draft.codec || "auto") + " codec" }
     function recoverySummary() {
+        if (adapter === "sunshine") return "Match via Sunshine · host resolution unverified"
         if (adapter === "macos") return "Follows the main display over SSH as " + (ssh.user || "?")
         if (adapter === "betterdisplay") return "Manages " + (chosenDisplay ? chosenDisplay.name : "a display") + " · " + modeLabel(display.mode) + " as " + (ssh.user || "?")
         if (adapter === "windows") return "Console helper via " + (ssh.alias || "?") + " · capture " + (chosenDisplay ? chosenDisplay.name : display.device_id || "?")
+        if (adapter === "virtual") return "Match selected Sunshine display · verified after connecting"
         return "Leaves the host display alone"
     }
-    readonly property var summaryRows: [["Name", draft.name || ""], ["Address", draft.host || ""], ["Operating system", ({macos: "macOS", windows: "Windows", linux: "Linux"})[draft.platform] || "Not specified"], ["Quality", summary()], ["Mouse", valueLabel(inputs, draft.input || "absolute")], ["Audio", valueLabel(audios, draft.audio || "focus")], ["Display recovery", recoverySummary()]]
+    readonly property var summaryRows: [["Name", draft.name || ""], ["Address", draft.host || ""], ["Operating system", ({macos: "macOS", windows: "Windows", linux: "Linux"})[draft.platform] || "Not specified"], ["Quality", summary()], ["Mouse", valueLabel(inputs, draft.input || "absolute")], ["Audio", valueLabel(audios, draft.audio || "focus")], ["Host display", recoverySummary()]]
     function begin(computer) {
         if (manager.setupBusy) return
         editing = !!computer; step = editing ? 1 : 0; draft = {}; paired = []; discovered = []; inspection = null
@@ -106,16 +125,18 @@ Sheet {
         set(group, inner)
     }
     function setAdapter(value) {
+        const initial = display.initial_resolution || "1920x1080"
         const next = {adapter: value}
         if (value !== "external") { if (display.require_ac !== undefined) next.require_ac = display.require_ac }
         set("display", next)
+        if (value !== "virtual" && fitsWindow) set("stream_resolution", initial)
     }
     function choose(host, platform) {
         const slug = host.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "computer"
         draft = {computer: slug + "-" + host.pairing_uuid.slice(0, 8), pairing_uuid: host.pairing_uuid,
             revision: revision, name: host.name, host: host.host, platform: platform || "unknown", profile: "desktop",
             stream_resolution: "1920x1080", fps: 60, bitrate: 30000, codec: "auto", input: "absolute", audio: "focus",
-            ssh: {}, display: {adapter: "external"}}
+            ssh: {}, display: {adapter: platform === "windows" ? "sunshine" : "external"}}
         step = 1; pairing = false; tested = false; error = ""; attempted = false; touched = {}; inspection = null
     }
     function pickDiscovered(entry) {
@@ -135,7 +156,7 @@ Sheet {
     function inspectHost() {
         if (manager.setupBusy) return
         error = ""
-        manager.setup("inspect", {computer: draft.computer, pairing_uuid: draft.pairing_uuid, host: draft.host, platform: platform, ssh: ssh})
+        manager.setup("inspect", {computer: draft.computer, pairing_uuid: draft.pairing_uuid, host: draft.host, platform: platform, ssh: ssh, adapter: adapter, display: display})
     }
     function installHelper() {
         if (manager.setupBusy) return
@@ -191,6 +212,9 @@ Sheet {
                     const d = list.find(x => x.uuid && x.main) || list.find(x => x.uuid)
                     if (d) { setup.setNested("display", "uuid", d.uuid); setup.setNested("display", "mode", d.current || (d.modes && d.modes.length ? d.modes[0] : null)) }
                 }
+                if (setup.adapter === "virtual" && result.virtual && result.virtual.sunshine_output) {
+                    setup.setNested("display", "output", result.virtual.sunshine_output)
+                }
                 if (setup.adapter === "windows" && !setup.display.device_id) {
                     const d = list.find(x => x.available && !x.internal && !x.active) || list.find(x => x.available && !x.internal) || list[0]
                     if (d) setup.setNested("display", "device_id", d.id)
@@ -227,6 +251,7 @@ Sheet {
     }
     component Input: Field { onActiveFocusChanged: if (activeFocus) setup.reveal(this) }
     component Choice: Select { onActiveFocusChanged: if (activeFocus) setup.reveal(this) }
+    component Pick: Combo { onActiveFocusChanged: if (activeFocus) setup.reveal(this) }
     component Card: Rectangle {
         default property alias content: cardColumn.data
         Layout.fillWidth: true; radius: 12; color: theme.colors.surface; border.color: theme.colors.border
@@ -427,7 +452,7 @@ Sheet {
                     ColumnLayout {
                         Layout.fillWidth: true; spacing: 8
                         FieldLabel { text: "Operating system" }
-                        Choice { objectName: "setupPlatform"; Layout.fillWidth: true; model: [{label: "Not specified", value: "unknown"}, {label: "macOS", value: "macos"}, {label: "Windows", value: "windows"}, {label: "Linux", value: "linux"}]; textRole: "label"; valueRole: "value"; currentIndex: Math.max(0, ["unknown", "macos", "windows", "linux"].indexOf(setup.draft.platform)); Accessible.name: "Operating system"; onActivated: { setup.set("platform", currentValue); if (setup.managed) setup.setAdapter("external") } }
+                        Choice { objectName: "setupPlatform"; Layout.fillWidth: true; model: [{label: "Not specified", value: "unknown"}, {label: "macOS", value: "macos"}, {label: "Windows", value: "windows"}, {label: "Linux", value: "linux"}]; textRole: "label"; valueRole: "value"; currentIndex: Math.max(0, ["unknown", "macos", "windows", "linux"].indexOf(setup.draft.platform)); Accessible.name: "Operating system"; onActivated: { setup.set("platform", currentValue); setup.setAdapter(currentValue === "windows" ? "sunshine" : "external") } }
                     }
                     ColumnLayout {
                         Layout.fillWidth: true; spacing: 8
@@ -456,8 +481,8 @@ Sheet {
                     }
                 }
                 // Display recovery: only for platforms with a managed adapter.
-                Section { visible: setup.recoverable; Layout.topMargin: 14; text: "DISPLAY RECOVERY" }
-                Choice { objectName: "setupAdapter"; visible: setup.recoverable; Layout.fillWidth: true; model: setup.adapters; textRole: "label"; valueRole: "value"; currentIndex: Math.max(0, setup.adapters.map(a => a.value).indexOf(setup.adapter)); Accessible.name: "Display recovery"; onActivated: setup.setAdapter(currentValue) }
+                Section { visible: setup.recoverable; Layout.topMargin: 14; text: "HOST DISPLAY (OPTIONAL)" }
+                Choice { objectName: "setupAdapter"; visible: setup.recoverable; Layout.fillWidth: true; model: setup.adapters; textRole: "label"; valueRole: "value"; currentIndex: Math.max(0, setup.adapters.map(a => a.value).indexOf(setup.adapter)); Accessible.name: "Host display"; onActivated: setup.setAdapter(currentValue) }
                 Hint { visible: setup.recoverable; text: setup.valueLabel(setup.adapters.map(a => ({label: a.hint, value: a.value})), setup.adapter) }
                 ColumnLayout {
                     visible: setup.recoverable && setup.managed && setup.platform === "macos"
@@ -513,16 +538,28 @@ Sheet {
                     FieldLabel { Layout.topMargin: 6; text: "SSH alias for the PC" }
                     Input { objectName: "setupSshAlias"; Layout.fillWidth: true; text: setup.ssh.alias || ""; placeholderText: "A Host entry in ~/.ssh/config with key access"; maximumLength: 64; invalid: setup.fieldError("ssh", setup.sshAliasError).length > 0; Accessible.name: "SSH alias"; onTextEdited: setup.setNested("ssh", "alias", text) }
                     Problem { text: setup.fieldError("ssh", setup.sshAliasError) }
-                    Hint { text: "The alias must reach an administrator account on the PC over OpenSSH. Sunshine must already capture a virtual display, named in its output_name setting." }
+                    Hint { visible: setup.adapter === "windows"; text: "The alias must reach an administrator account on the PC over OpenSSH. Sunshine must already capture a virtual display, named in its output_name setting." }
+                    Hint { visible: setup.adapter === "virtual"; text: "SSH is used to verify the selected display and its captured resolution. Basic streaming with Use existing host display needs no SSH. Refit stays disabled until a connection is verified." }
                     RowLayout {
                         Layout.topMargin: 4; spacing: 8
-                        ActionButton { objectName: "setupInspect"; text: setup.inspection ? "Inspect again" : "Inspect the PC"; icon.source: "qrc:/qml/icons/monitor.svg"; enabled: !manager.setupBusy && !setup.sshAliasError; onClicked: setup.inspectHost() }
-                        ActionButton { objectName: "setupInstall"; visible: !!(setup.inspection && setup.inspection.helper && !setup.inspection.helper.installed); text: "Install the helper"; icon.source: "qrc:/qml/icons/play.svg"; enabled: !manager.setupBusy && !!setup.display.device_id; hint: "Installs the recovery helper on the PC over SSH; needs an administrator account"; onClicked: setup.installHelper() }
+                        ActionButton { objectName: "setupInspect"; text: setup.inspection ? "Inspect again" : "Inspect the PC"; icon.source: "qrc:/qml/icons/monitor.svg"; enabled: !manager.setupBusy && !setup.sshAliasError && (setup.adapter !== "virtual" || (setup.ssh.alias || "").length > 0); onClicked: setup.inspectHost() }
+                        ActionButton { objectName: "setupInstall"; visible: setup.adapter === "windows" && !!(setup.inspection && setup.inspection.helper && !setup.inspection.helper.installed); text: "Install the helper"; icon.source: "qrc:/qml/icons/play.svg"; enabled: !manager.setupBusy && !!setup.display.device_id; hint: "Installs the recovery helper on the PC over SSH; needs an administrator account"; onClicked: setup.installHelper() }
                     }
-                    Hint { visible: !setup.inspection && !setup.attempted; text: "Inspect the PC to list its displays, Sunshine's capture output, and whether the helper is installed." }
+                    Hint { visible: !setup.inspection && !setup.attempted; text: setup.adapter === "virtual" ? "Inspect the PC to read the virtual display's size list and Sunshine's display options." : "Inspect the PC to list its displays, Sunshine's capture output, and whether the helper is installed." }
                     Problem { text: setup.attempted ? setup.displayError : "" }
                     ColumnLayout {
-                        visible: setup.inspection && setup.inspection.platform === "windows"
+                        visible: setup.adapter === "virtual" && !!(setup.inspection && setup.inspection.virtual)
+                        Layout.fillWidth: true; spacing: 8
+                        readonly property var virt: setup.inspection && setup.inspection.virtual ? setup.inspection.virtual : ({})
+                        Hint { text: "Selected Sunshine display: " + (setup.display.output || "Not selected") }
+                        Check { text: "Manage Virtual Display Driver sizes over SSH"; checked: !!setup.display.sync_modes; onToggled: setup.setNested("display", "sync_modes", checked) }
+                        Hint { text: "Enable size management only for the supported Virtual Display Driver. It edits its mode list and reloads it before connecting. Leave it off for physical monitors or host-managed sizes." }
+                        Hint { text: "Sunshine resolution option: " + (parent.virt.dd_resolution_option || "unset") + " · Driver sizes: " + ((parent.virt.modes || []).join(", ") || "none") + (parent.virt.driver_pipe ? " · driver reloads on demand" : " · driver control pipe not found") }
+                        Hint { visible: parent.virt.dd_resolution_option !== "auto"; color: theme.colors.warning; text: "Set dd_resolution_option = auto in Sunshine's configuration and restart Sunshine, so the virtual display takes the stream's size." }
+                        Hint { visible: parent.virt.settings_present === false; color: theme.colors.warning; text: "The driver's settings file was not found at " + (parent.virt.settings || "") + "." }
+                    }
+                    ColumnLayout {
+                        visible: setup.adapter === "windows" && setup.inspection && setup.inspection.platform === "windows"
                         Layout.fillWidth: true; spacing: 8
                         Hint { text: "Sunshine output: " + (setup.inspection && setup.inspection.sunshine_output ? setup.inspection.sunshine_output : "not set") + " · Helper: " + (setup.inspection && setup.inspection.helper && setup.inspection.helper.installed ? "installed" + (setup.inspection.helper.fresh === false ? " (not running)" : "") : "not installed") }
                         Hint { visible: !!(setup.inspection && !setup.inspection.sunshine_output); text: "Set output_name in Sunshine's configuration to the virtual display before installing the helper."; color: theme.colors.warning }
@@ -554,7 +591,34 @@ Sheet {
                     FieldLabel { text: "Frame rate" }
                     ColumnLayout {
                         Layout.fillWidth: true; spacing: 6
-                        Input { Layout.fillWidth: true; text: setup.draft.stream_resolution || ""; placeholderText: "2560x1440"; invalid: setup.fieldError("stream_resolution", setup.resolutionError).length > 0; Accessible.name: "Stream resolution"; onTextEdited: setup.set("stream_resolution", text) }
+                        Pick {
+                            objectName: "setupResolution"
+                            Layout.fillWidth: true
+                            model: setup.resolutions
+                            enabled: !setup.fitsWindow
+                            value: setup.fitsWindow ? "" : setup.draft.stream_resolution || ""
+                            placeholder: setup.fitsWindow ? "Last saved stream size" : ""
+                            validator: RegularExpressionValidator { regularExpression: /[0-9]{0,5}x?[0-9]{0,5}/ }
+                            invalid: setup.fieldError("stream_resolution", setup.resolutionError).length > 0
+                            Accessible.name: "Stream resolution"
+                            onEdited: function(text) { setup.set("stream_resolution", text) }
+                        }
+                        Check {
+                            objectName: "setupFitWindow"
+                            visible: setup.adapter !== "sunshine"
+                            text: "Enable manual Refit"
+                            checked: setup.fitsWindow
+                            enabled: setup.matchingConfigured
+                            Accessible.name: "Size the stream to the window"
+                            onToggled: {
+                                if (checked && !setup.matchingConfigured) { checked = false; return }
+                                if (checked && !setup.fitsWindow) setup.setNested("display", "initial_resolution", setup.draft.stream_resolution || "1920x1080")
+                                setup.set("stream_resolution", checked ? "auto" : setup.display.initial_resolution || "1920x1080")
+                            }
+                        }
+                        Hint { visible: setup.adapter === "sunshine"; text: "Connect uses the saved size. Refit requests the current window size and remembers it. The host resolution remains unverified without SSH." }
+                        Hint { visible: setup.adapter !== "sunshine" && !setup.matchingConfigured; text: "Window resizing scales the picture. To change the host resolution, choose a Sunshine matching mode above." }
+                        Hint { visible: setup.fitsWindow; text: "Each connection opens at the size last used here. Press Refit in the connection view to match the current window; that size is then remembered for next time." }
                         Problem { text: setup.fieldError("stream_resolution", setup.resolutionError) }
                     }
                     Spin { onActiveFocusChanged: if (activeFocus) setup.reveal(this); Layout.fillWidth: true; Layout.alignment: Qt.AlignTop; from: 20; to: 240; value: setup.draft.fps || 60; Accessible.name: "Frames per second"; onValueModified: setup.set("fps", value) }

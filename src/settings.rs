@@ -57,7 +57,7 @@ fn subject(value: &Value, draft: &Value) -> Result<Value> {
     if computer.get("pairing_uuid").is_none() {
         computer["pairing_uuid"] = draft["pairing_uuid"].clone();
     }
-    for key in ["host", "platform"] {
+    for key in ["host", "platform", "adapter", "display"] {
         if draft.get(key).is_some() {
             computer[key] = draft[key].clone();
         }
@@ -70,6 +70,7 @@ fn subject(value: &Value, draft: &Value) -> Result<Value> {
     }
     Ok(computer)
 }
+
 // A session record is only dropped once nothing owns it: no desired intent,
 // no live client, and no pending host recovery journal.
 async fn forget(paths: &Paths, computer: &str) -> Result<()> {
@@ -236,6 +237,9 @@ async fn candidate(paths: &Paths, mut value: Value, draft: &Value) -> Result<Val
     ] {
         computer["profiles"][profile][key] = draft[key].clone();
     }
+    // Optional and defaulted, so a draft that omits it saves a valid boolean.
+    computer["profiles"][profile]["follow_window"] =
+        json!(draft["follow_window"].as_bool().unwrap_or(false));
     // SSH identity fields and the default profile's display recovery are
     // editable; drafts without them leave the saved values untouched.
     if let Some(ssh) = draft.get("ssh").and_then(Value::as_object) {
@@ -264,7 +268,17 @@ async fn candidate(paths: &Paths, mut value: Value, draft: &Value) -> Result<Val
         let mut next = serde_json::Map::new();
         next.insert("adapter".into(), json!(adapter));
         if adapter != "external" {
-            for key in ["uuid", "follow_main", "require_ac", "mode", "device_id"] {
+            for key in [
+                "uuid",
+                "follow_main",
+                "require_ac",
+                "mode",
+                "device_id",
+                "output",
+                "sync_modes",
+                "settings",
+                "initial_resolution",
+            ] {
                 if let Some(v) = display.get(key)
                     && !v.is_null()
                 {
@@ -408,6 +422,36 @@ pub async fn run(paths: &Paths, action: &Action) -> Result<Value> {
                 storage::write(&paths.config, &next)?;
                 Ok(json!({"saved":true,"computer":draft["computer"]}))
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod inspection_tests {
+    use super::*;
+
+    #[test]
+    fn subject_preserves_virtual_inspection_settings_and_saved_identity() {
+        let draft = json!({
+            "computer": "work-pc", "platform": "windows", "adapter": "virtual",
+            "display": {"adapter": "virtual", "settings": "D:\\VDD\\vdd_settings.xml"},
+            "ssh": {"alias": "work-pc"}, "pairing_uuid": "draft-identity"
+        });
+        for value in [
+            json!({"computers": {}}),
+            json!({"computers": {"work-pc": {"pairing_uuid": "saved-identity"}}}),
+        ] {
+            let computer = subject(&value, &draft).unwrap();
+            assert_eq!(computer["adapter"], "virtual");
+            assert_eq!(computer["display"], draft["display"]);
+            assert_eq!(computer["ssh"], draft["ssh"]);
+            assert_eq!(
+                computer["pairing_uuid"],
+                value["computers"]["work-pc"]
+                    .get("pairing_uuid")
+                    .unwrap_or(&draft["pairing_uuid"])
+                    .clone()
+            );
         }
     }
 }

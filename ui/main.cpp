@@ -81,10 +81,10 @@ int main(int argc, char **argv) {
                 return;
             }
             QVariantMap host{{"name", "Home workstation"}, {"host", "home.example.net"}, {"pairing_uuid", "11111111-2222-3333-4444-555555555555"}};
-            const QString platform = page == "recovery" ? "macos" : page == "windows" ? "windows" : "unknown";
+            const QString platform = page == "recovery" ? "macos" : (page == "windows" || page == "matching") ? "windows" : "unknown";
             QMetaObject::invokeMethod(setup, "choose", Q_ARG(QVariant, QVariant(host)), Q_ARG(QVariant, QVariant(platform)));
-            if (page == "recovery" || page == "windows") {
-                QMetaObject::invokeMethod(setup, "setAdapter", Q_ARG(QVariant, QVariant(page == "recovery" ? "betterdisplay" : "windows")));
+            if (page == "recovery" || page == "windows" || page == "matching") {
+                QMetaObject::invokeMethod(setup, "setAdapter", Q_ARG(QVariant, QVariant(page == "recovery" ? "betterdisplay" : page == "matching" ? "virtual" : "windows")));
                 QMetaObject::invokeMethod(setup, "setNested", Q_ARG(QVariant, QVariant("ssh")), Q_ARG(QVariant, QVariant(page == "recovery" ? "user" : "alias")), Q_ARG(QVariant, QVariant(page == "recovery" ? "streamer" : "garage")));
                 QMetaObject::invokeMethod(setup, "inspectHost");
             }

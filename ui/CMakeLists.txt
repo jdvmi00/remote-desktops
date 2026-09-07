@@ -6,13 +6,13 @@ set(CMAKE_AUTOMOC ON)
 find_package(Qt6 6.4 REQUIRED COMPONENTS Quick QuickControls2 Network Test)
 set(QML_FILES
     qml/Main.qml qml/SetupDialog.qml qml/ActionButton.qml qml/IconButton.qml qml/Icon.qml qml/Tip.qml
-    qml/Bar.qml qml/Field.qml qml/Check.qml qml/Spin.qml qml/Select.qml qml/StatusDot.qml
+    qml/Bar.qml qml/Field.qml qml/Check.qml qml/Spin.qml qml/Select.qml qml/Combo.qml qml/StatusDot.qml
     qml/Sheet.qml qml/Confirm.qml qml/Toast.qml qml/ComputerGlyph.qml)
 set(ICON_FILES
     qml/icons/alert.svg qml/icons/arrow-left.svg qml/icons/check.svg qml/icons/chevron-down.svg qml/icons/chevron-right.svg qml/icons/close.svg
     qml/icons/copy.svg qml/icons/external.svg qml/icons/grid.svg qml/icons/help.svg qml/icons/info.svg
     qml/icons/laptop.svg qml/icons/minus.svg qml/icons/monitor.svg qml/icons/pencil.svg qml/icons/play.svg
-    qml/icons/plus.svg qml/icons/power.svg qml/icons/refresh.svg qml/icons/trash.svg)
+    qml/icons/plus.svg qml/icons/power.svg qml/icons/refresh.svg qml/icons/sliders.svg qml/icons/trash.svg)
 qt_add_executable(remote-desktops-manager main.cpp Manager.cpp Manager.h Theme.cpp Theme.h)
 qt_add_resources(remote-desktops-manager qml PREFIX "/" FILES ${QML_FILES} ${ICON_FILES})
 target_link_libraries(remote-desktops-manager PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::Network)
@@ -38,7 +38,7 @@ set_tests_properties(qml-light PROPERTIES ENVIRONMENT "${TEST_ENVIRONMENT}")
 add_test(NAME qml-setup COMMAND remote-desktops-manager --demo --setup-preview computer --compact --smoke-test)
 set_tests_properties(qml-setup PROPERTIES ENVIRONMENT "${TEST_ENVIRONMENT}")
 
-foreach(page pair preferences recovery windows advanced check)
+foreach(page pair preferences recovery windows matching advanced check)
     add_test(NAME qml-setup-${page} COMMAND remote-desktops-manager --demo --setup-preview ${page} --compact --smoke-test)
     set_tests_properties(qml-setup-${page} PROPERTIES ENVIRONMENT "${TEST_ENVIRONMENT}")
 endforeach()

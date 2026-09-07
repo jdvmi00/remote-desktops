@@ -355,6 +355,112 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 s.configuration(self.config)
 
+    def test_fit_window_profiles_validate_and_need_a_resolved_size(self):
+        c = computer()
+        c["profiles"]["desktop"]["stream_resolution"] = "auto"
+        self.config.write_text(json.dumps({"version": 1, "computers": {"laptop": c}}))
+        s.configuration(self.config)
+        with self.assertRaisesRegex(ValueError, "resolution-required"):
+            s.stream_argv(c, c["profiles"]["desktop"])
+        args = s.stream_argv(c, c["profiles"]["desktop"], "6120x2506")
+        self.assertEqual(args[args.index("--resolution") + 1], "6120x2506")
+        for bad in ("6120x2506;touch /tmp/bad", "auto", "100x100"):
+            with self.assertRaises(ValueError):
+                s.stream_argv(c, c["profiles"]["desktop"], bad)
+        # A fixed profile ignores the daemon's fitted size unless it asks for one.
+        fixed = computer()
+        self.assertIn("2560x1440", s.stream_argv(fixed, fixed["profiles"]["desktop"]))
+        with self.assertRaises(ValueError):
+            s.resolution("auto")
+
+    def test_existing_windows_display_needs_no_ssh_and_never_prepares_host(self):
+        c = computer()
+        c["platform"] = "windows"
+        del c["ssh"]
+        profile = c["profiles"]["desktop"]
+        profile["stream_resolution"] = "1920x1080"
+        host = s.Host(c, profile)
+        with patch.object(s.windows_display, "powershell", side_effect=AssertionError("SSH called")):
+            self.assertEqual(host.probe(pairing=False)["restoration"], "externally-managed")
+            record = {}
+            s.prepare(record, host, lambda: self.fail("unexpected host state write"))
+            self.assertEqual(record, {})
+        argv = s.stream_argv(c, profile)
+        self.assertEqual(argv[argv.index("--resolution") + 1], "1920x1080")
+        self.assertIn("--no-game-optimization", argv)
+
+    def test_sunshine_matching_needs_no_ssh_and_never_prepares_host(self):
+        c = computer()
+        c["platform"] = "windows"
+        del c["ssh"]
+        profile = c["profiles"]["desktop"]
+        profile["stream_resolution"] = "1920x1080"
+        profile["display"] = {"adapter": "sunshine"}
+        s.configuration_value({"version": 1, "computers": {"laptop": c}})
+        host = s.Host(c, profile)
+        with patch.object(s.windows_display, "powershell", side_effect=AssertionError("SSH called")):
+            self.assertEqual(host.probe(pairing=False)["restoration"], "sunshine")
+            record = {}
+            s.prepare(record, host, lambda: self.fail("unexpected host state write"))
+            self.assertEqual(record, {})
+            self.assertTrue(s.restore(record, host, lambda: self.fail("unexpected write")))
+            self.assertFalse(host.probe(pairing=False)["host_display"]["verified"])
+        argv = s.stream_argv(c, profile)
+        self.assertEqual(argv[argv.index("--resolution") + 1], "1920x1080")
+        self.assertIn("--game-optimization", argv)
+
+    def test_virtual_display_mode_management_is_opt_in_and_verified_separately(self):
+        from remote_desktops import virtual_display as v, sunshine_display as sd
+        c = computer()
+        c.update(platform="windows", ssh={"alias": "work-laptop"})
+        profile = c["profiles"]["desktop"]
+        profile["display"] = {"adapter": "virtual", "output": "{11111111-2222-3333-4444-555555555555}"}
+        self.config.write_text(json.dumps({"version": 1, "computers": {"laptop": c}}))
+        s.configuration(self.config)
+        for bad in ({"adapter": "virtual", "settings": "relative.xml"}, {"adapter": "virtual", "settings": "C:\\a'b.xml"}):
+            profile["display"] = bad
+            with self.assertRaises(ValueError):
+                s.configuration_value({"version": 1, "computers": {"laptop": c}})
+        profile["display"] = {"adapter": "virtual", "output": "{11111111-2222-3333-4444-555555555555}"}
+        host = s.Host(c, profile)
+        record = {"stream_resolution": "2474x1646"}
+        with patch.object(sd, "snapshot", return_value={"offset": 100, "created": "stamp"}), patch.object(v, "sync") as sync:
+            s.prepare(record, host, lambda: None)
+            sync.assert_not_called()
+            self.assertFalse(record["resolved"]["host_display"]["verified"])
+            profile["display"]["sync_modes"] = True
+            s.prepare(record, host, lambda: None)
+            sync.assert_called_once_with("work-laptop", "2474x1646", v.SETTINGS, profile.get("fps", 60))
+        self.assertTrue(s.restore(record, host, lambda: None))
+        # Configuring mode management does not turn a failed update into success.
+        with patch.object(sd, "snapshot"), patch.object(v, "sync", side_effect=ValueError("driver reload failed")):
+            with self.assertRaisesRegex(ValueError, "driver reload failed"):
+                s.prepare(record, host, lambda: None)
+        del c["ssh"]
+        with patch.object(v.windows_display, "powershell") as ps:
+            with self.assertRaisesRegex(ValueError, "display-verification-required"):
+                host.probe(pairing=False)
+            ps.assert_not_called()
+        with patch.object(v.windows_display, "powershell", return_value={"ok": True, "result": {"changed": False, "modes": ["2218x1246"]}}):
+            with self.assertRaisesRegex(ValueError, "mode-missing"):
+                v.sync("work-laptop", "2474x1646")
+        with self.assertRaises(ValueError):
+            v.sync("work-laptop", "2474x1646;evil")
+
+    def test_virtual_refit_requests_sunshine_resolution_switching(self):
+        c = computer()
+        c["platform"] = "windows"
+        profile = c["profiles"]["desktop"]
+        for adapter in ("virtual", "sunshine", "windows", "external"):
+            profile["display"] = {"adapter": adapter}
+            for fitted in (None, "2474x1646"):
+                with self.subTest(adapter=adapter, fitted=fitted):
+                    args = s.stream_argv(c, profile, fitted)
+                    self.assertEqual(args[args.index("--resolution") + 1], fitted or profile["stream_resolution"])
+                    self.assertEqual("--game-optimization" in args, adapter in ("virtual", "sunshine"))
+                    self.assertEqual("--no-game-optimization" in args, adapter not in ("virtual", "sunshine"))
+                    self.assertIn("--no-quit-after", args)
+
     def test_cli_never_requests_host_app_termination(self):
         c = computer()
         args = s.stream_argv(c, c["profiles"]["desktop"])

@@ -9,7 +9,7 @@ import re
 import shutil
 import subprocess
 from .host import Host, moonlight_hosts, require
-from . import windows_display
+from . import virtual_display, windows_display
 
 HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.:-]{0,252}\Z")
 SSH_USER = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}\Z")
@@ -138,6 +138,10 @@ def inspect(computer):
         return {"platform": "macos", **listing}
     if computer.get("platform") == "windows":
         require(windows_display.ALIAS.fullmatch(ssh.get("alias", "")), "ssh-alias-required: enter the approved SSH alias for this PC")
+        if computer.get("adapter") == "virtual":
+            # No display inventory: only the driver's size list and Sunshine's options, which work from any SSH session.
+            return {"platform": "windows", "virtual": virtual_display.inspect(ssh["alias"], computer["pairing_uuid"],
+                                                                            virtual_display.settings_path(computer.get("display") or {}))}
         return {"platform": "windows", **windows_display.inspect(ssh["alias"], computer["pairing_uuid"])}
     raise ValueError("display recovery is available for macOS and Windows hosts")
 

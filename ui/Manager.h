@@ -22,6 +22,7 @@ class Manager : public QObject {
     Q_PROPERTY(bool serviceBusy READ serviceBusy NOTIFY changed)
     Q_PROPERTY(bool moonlightAvailable READ moonlightAvailable CONSTANT)
     Q_PROPERTY(bool demo READ demo CONSTANT)
+    Q_PROPERTY(QVariantMap windowRule READ windowRule NOTIFY changed)
 public:
     explicit Manager(QString backend, QString socket, bool demo = false, QObject *parent = nullptr);
     QVariantList computers() const;
@@ -45,6 +46,8 @@ public:
     Q_INVOKABLE void notify(QString text, bool error = false);
     Q_INVOKABLE void clearNotice();
     Q_INVOKABLE void demoState(QString phase);
+    QVariantMap windowRule() const;
+    Q_INVOKABLE void setWindowRule(bool tiled);
     void poll();
 signals:
     void changed();
@@ -52,11 +55,13 @@ signals:
 private:
     void publish();
     void loadCatalog();
+    void loadWindowRule();
     QString label(const QString &computer) const;
     void process(QStringList arguments, std::function<void(bool, QByteArray)> complete, QByteArray input = {}, int deadline = 60000);
     QString m_backend, m_socketPath, m_error, m_notice, m_moonlight;
     bool m_demo, m_loading = true, m_available = false, m_active = true, m_catalogLoading = false;
-    bool m_noticeError = false, m_setupBusy = false, m_serviceBusy = false;
+    bool m_noticeError = false, m_setupBusy = false, m_serviceBusy = false, m_windowRuleBusy = false;
+    QJsonObject m_windowRule;
     QJsonArray m_catalog, m_sessions;
     QSet<QString> m_busy;
     QMap<QString, QVariantMap> m_demoDrafts;
