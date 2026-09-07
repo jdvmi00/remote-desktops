@@ -48,6 +48,21 @@ private slots:
         QVERIFY(help); QVERIFY(QMetaObject::invokeMethod(help, "open"));
         QTest::keyClick(window, Qt::Key_Escape);
         QTRY_VERIFY(!help->property("visible").toBool());
+        // Preferences: the tiled-window rule toggles through the manager and reads back.
+        auto *preferences = window->findChild<QObject *>("preferencesDialog");
+        QVERIFY(preferences); QVERIFY(QMetaObject::invokeMethod(preferences, "open"));
+        auto *tiled = preferences->findChild<QObject *>("tiledCheck");
+        QVERIFY(tiled);
+        QVERIFY(!tiled->property("checked").toBool());
+        QVERIFY(tiled->property("enabled").toBool());
+        tiled->setProperty("checked", true);
+        QVERIFY(QMetaObject::invokeMethod(tiled, "toggled"));
+        QVERIFY(m.windowRule()["busy"].toBool());
+        QTRY_VERIFY(m.windowRule()["installed"].toBool());
+        QVERIFY(tiled->property("checked").toBool());
+        QVERIFY(m.notice().contains("tiled"));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!preferences->property("visible").toBool());
         QCOMPARE(warnings.count(), 0);
         window->close();
         QCOMPARE(m.computers()[1].toMap()["phase"].toString(), QString("window-ready"));
@@ -267,7 +282,23 @@ fi
         auto draft = dialog->property("draft").toMap();
         QCOMPARE(draft["pairing_uuid"].toString(), QString("22222222-3333-4444-5555-666666666666"));
         QCOMPARE(draft["platform"].toString(), QString("windows"));
-        QCOMPARE(draft["display"].toMap()["adapter"].toString(), QString("external"));
+        QCOMPARE(draft["display"].toMap()["adapter"].toString(), QString("sunshine"));
+        // Default matching needs no SSH; verified matching below requires inspection.
+        QCOMPARE(draft["stream_resolution"].toString(), QString("1920x1080"));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "setAdapter", Q_ARG(QVariant, QVariant("virtual"))));
+        QVERIFY(dialog->property("sshAliasError").toString().isEmpty());
+        QVERIFY(!dialog->property("displayError").toString().isEmpty());
+        QVERIFY(QMetaObject::invokeMethod(dialog, "setNested", Q_ARG(QVariant, QVariant("ssh")), Q_ARG(QVariant, QVariant("alias")), Q_ARG(QVariant, QVariant("bad alias"))));
+        QVERIFY(!dialog->property("sshAliasError").toString().isEmpty());
+        QVERIFY(QMetaObject::invokeMethod(dialog, "setNested", Q_ARG(QVariant, QVariant("ssh")), Q_ARG(QVariant, QVariant("alias")), Q_ARG(QVariant, QVariant(""))));
+        QVariant recovery;
+        QVERIFY(QMetaObject::invokeMethod(dialog, "recoverySummary", Q_RETURN_ARG(QVariant, recovery)));
+        QVERIFY(recovery.toString().contains("verified after connecting"));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "setNested", Q_ARG(QVariant, QVariant("ssh")), Q_ARG(QVariant, QVariant("alias")), Q_ARG(QVariant, QVariant("fake-pc"))));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "inspectHost"));
+        QTRY_VERIFY_WITH_TIMEOUT(!m.setupBusy(), 4000);
+        QVERIFY(!dialog->property("draft").toMap()["display"].toMap()["output"].toString().isEmpty());
+        QVERIFY(dialog->property("displayError").toString().isEmpty());
         // Managed Windows recovery: alias, inspection, capture display, helper install.
         QVERIFY(QMetaObject::invokeMethod(dialog, "setAdapter", Q_ARG(QVariant, QVariant("windows"))));
         auto *next = dialog->findChild<QObject *>("setupNext");
@@ -300,6 +331,92 @@ fi
         QCOMPARE(dialog->property("errorAction").toString(), QString("pair"));
         QCOMPARE(warnings.count(), 0);
         window->close();
+    }
+    void resolutionIsPickedFromTheHostOrTyped() {
+        Manager m("/missing", "/missing", true);
+        Theme theme("/missing/palette");
+        QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.rootContext()->setContextProperty("manager", &m);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        window->show();
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+        auto *dialog = window->findChild<QObject *>("setupDialog");
+        QVERIFY(QMetaObject::invokeMethod(dialog, "begin", Q_ARG(QVariant, QVariant(""))));
+        QTRY_VERIFY(dialog->property("loaded").toBool());
+        QTRY_VERIFY(!dialog->property("discovering").toBool());
+        QVariantMap host{{"name", "Studio"}, {"host", "studio.example.net"}, {"pairing_uuid", "11111111-2222-3333-4444-555555555555"}};
+        QVERIFY(QMetaObject::invokeMethod(dialog, "choose", Q_ARG(QVariant, QVariant(host)), Q_ARG(QVariant, QVariant("macos"))));
+        dialog->setProperty("advanced", true);
+        auto *field = dialog->findChild<QQuickItem *>("setupResolution");
+        QVERIFY(field);
+        QVERIFY(field->property("editable").toBool());
+        QCOMPARE(field->property("editText").toString(), QString("1920x1080")); // The balanced preset.
+        QCOMPARE(field->property("currentIndex").toInt(), 0);
+        // Picking a suggestion updates the draft and the quality preset.
+        field->setProperty("currentIndex", 1);
+        QVERIFY(QMetaObject::invokeMethod(field, "activated", Q_ARG(int, 1)));
+        QCOMPARE(dialog->property("draft").toMap()["stream_resolution"].toString(), QString("2560x1440"));
+        QCOMPARE(dialog->property("presetIndex").toInt(), 3); // Bitrate no longer matches a preset: custom.
+        // Typing any WIDTHxHEIGHT is accepted; the validator blocks other characters.
+        field->forceActiveFocus();
+        QTRY_VERIFY(field->property("contentItem").value<QQuickItem *>()->hasActiveFocus());
+        const auto type = [window](const QString &text) { for (const QChar c : text) QTest::keyClick(window, c.toLatin1()); };
+        QTest::keyClick(window, Qt::Key_A, Qt::ControlModifier);
+        type("3000x2000abc");
+        QCOMPARE(field->property("editText").toString(), QString("3000x2000"));
+        QCOMPARE(dialog->property("draft").toMap()["stream_resolution"].toString(), QString("3000x2000"));
+        QVERIFY(dialog->property("resolutionError").toString().isEmpty());
+        QTest::keyClick(window, Qt::Key_A, Qt::ControlModifier);
+        type("3000x");
+        QVERIFY(!dialog->property("resolutionError").toString().isEmpty());
+        QVERIFY(field->property("invalid").toBool());
+        type("1500");
+        QVERIFY(!field->property("invalid").toBool());
+        // Leaving the field keeps the typed value and marks it as not in the list.
+        dialog->findChild<QQuickItem *>("setupNext")->forceActiveFocus();
+        QTRY_VERIFY(!field->hasActiveFocus());
+        QCOMPARE(field->property("editText").toString(), QString("3000x1500"));
+        QCOMPARE(dialog->property("draft").toMap()["stream_resolution"].toString(), QString("3000x1500"));
+        QCOMPARE(field->property("currentIndex").toInt(), -1);
+        // A preset chosen elsewhere is reflected back into the field.
+        QVERIFY(QMetaObject::invokeMethod(dialog, "set", Q_ARG(QVariant, QVariant("stream_resolution")), Q_ARG(QVariant, QVariant("3840x2160"))));
+        QCOMPARE(field->property("editText").toString(), QString("3840x2160"));
+        QCOMPARE(field->property("currentIndex").toInt(), 3);
+        // An inspected Mac display offers its modes first, with HiDPI modes doubled to their pixel size.
+        QVERIFY(QMetaObject::invokeMethod(dialog, "setAdapter", Q_ARG(QVariant, QVariant("betterdisplay"))));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "setNested", Q_ARG(QVariant, QVariant("ssh")), Q_ARG(QVariant, QVariant("user")), Q_ARG(QVariant, QVariant("streamer"))));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "inspectHost"));
+        QTRY_VERIFY(dialog->property("inspection").toMap().contains("displays"));
+        const auto offered = dialog->property("resolutions").toStringList();
+        QCOMPARE(offered.mid(0, 3), QStringList({"5120x2880", "2560x1440", "3840x2160"}));
+        QVERIFY(offered.contains("1920x1080"));
+        QCOMPARE(offered.count("2560x1440"), 1);
+        QCOMPARE(field->property("editText").toString(), QString("3840x2160"));
+        QCOMPARE(field->property("currentIndex").toInt(), 2);
+        // Existing-display and fixed-mode adapters cannot promise host refitting.
+        auto *fit = dialog->findChild<QObject *>("setupFitWindow");
+        QVERIFY(fit);
+        QVERIFY(!fit->property("enabled").toBool());
+        QVERIFY(QMetaObject::invokeMethod(dialog, "setAdapter", Q_ARG(QVariant, QVariant("virtual"))));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "setNested", Q_ARG(QVariant, QVariant("ssh")), Q_ARG(QVariant, QVariant("alias")), Q_ARG(QVariant, QVariant("test-pc"))));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "setNested", Q_ARG(QVariant, QVariant("display")), Q_ARG(QVariant, QVariant("output")), Q_ARG(QVariant, QVariant("{11111111-2222-3333-4444-555555555555}"))));
+        QVERIFY(fit->property("enabled").toBool());
+        fit->setProperty("checked", true);
+        QVERIFY(QMetaObject::invokeMethod(fit, "toggled"));
+        QCOMPARE(dialog->property("draft").toMap()["stream_resolution"].toString(), QString("auto"));
+        QVERIFY(!field->property("enabled").toBool());
+        QVariant summary;
+        QVERIFY(QMetaObject::invokeMethod(dialog, "summary", Q_RETURN_ARG(QVariant, summary)));
+        QVERIFY(summary.toString().startsWith("Saved size with manual Refit"));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "setAdapter", Q_ARG(QVariant, QVariant("external"))));
+        QCOMPARE(dialog->property("draft").toMap()["stream_resolution"].toString(), QString("3840x2160"));
+        QVERIFY(field->property("enabled").toBool());
+        QVERIFY(!fit->property("enabled").toBool());
+        QVERIFY(warnings.isEmpty());
     }
     void launcherRemovalUsesTheLauncherCommand() {
         QTemporaryDir temp;

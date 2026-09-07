@@ -44,18 +44,68 @@ the same intermediate phases a real session reports. The example computers are
 synthetic. `--state` supports `idle`, `connecting`, `preflight`, `running`,
 `attention`, `restore-pending`, `empty`, `unavailable`, `many` (twelve
 computers), and `unconfigured` (a removed computer with a pending restore).
-`--dialog` opens `help`, `details`, `remove`, `notice`, or `error`.
+`--dialog` opens `help`, `preferences`, `details`, `remove`, `notice`, or `error`.
 `--setup-preview` accepts `computer`, `pair`, `preferences`, `recovery`
 (macOS with BetterDisplay), `windows`, `advanced`, and `check`. `--compact`
 renders the minimum window size. With an offscreen platform,
 `--screenshot /tmp/manager.png` exports the rendered demo. These preview and
 screenshot options require `--demo`.
 
+## Local development loop
+
+Use `python3 scripts/dev.py build` to build the Rust CLI/daemon and Qt manager
+in the checkout. Rust/Cargo and the Qt dependencies listed above must be on
+PATH. This command does not install files or restart running processes.
+
+For UI work without a real host:
+
+```sh
+python3 scripts/dev.py preview
+python3 scripts/dev.py preview --setup-preview windows
+```
+
+For live testing, first disconnect all streams in the existing manager and
+finish any pending display recovery. Close that manager, then stop its daemon
+with SIGTERM (or stop its service if you configured one). Confirm the PID before
+signalling it; the `ui` command below reports a conflicting daemon's PID.
+Do not delete state or recovery files. Start these in separate terminals:
+
+```sh
+python3 scripts/dev.py daemon
+python3 scripts/dev.py ui
+```
+
+These use your existing configuration and state. The daemon runs in the
+foreground and uses the checkout's Python/PowerShell helpers. Its existing
+writer lock prevents a second controller from taking ownership. The UI command
+checks the socket's peer PID against the current build's executable inode and
+refuses an installed or outdated daemon. Use this command instead of the desktop
+launcher during development. CLI actions are available through, for example,
+`python3 scripts/dev.py cli status`.
+
+After editing:
+
+- Python and PowerShell helpers are read from the checkout on the next host
+  operation. Reconnect or Refit explicitly to exercise launch-time changes.
+- QML/C++ changes: run `python3 scripts/dev.py build`, close the dev manager,
+  and reopen it with `ui` (or `preview`). QML is embedded in the executable;
+  there is no automatic hot reload.
+- Rust changes: disconnect streams and finish recovery, close the dev manager,
+  stop the foreground daemon with Ctrl+C, build, then run `daemon` and `ui`
+  again. Rebuilding alone does not replace a running daemon or supervisor.
+
+Closing a manager or pressing Ctrl+C in the daemon does not disconnect streams
+or restore displays. Always disconnect through the app before stopping the dev
+daemon. Builds and previews are separate from the full checks in
+[the development workflow](RELEASING.md); real streaming remains a manual test.
+
 ## Layout
 
 - The header carries the application identity, the background service
   indicator (running, not responding, or starting; click it to check again),
-  refresh, and help.
+  refresh, preferences, and help. Preferences holds one desktop option: Open
+  remote desktops tiled, which adds or removes the Hyprland rule described in
+  LAUNCHERS.md and explains when a hand-written rule already covers it.
 - The sidebar lists computers with a status dot and label per row, scrolls
   with a visible bar, and holds the one global primary action, Add computer.
 - The main pane shows the selected computer's name, platform, and address,
@@ -123,15 +173,19 @@ Steps are shown with completed, current, and upcoming markers; editing an
 existing computer skips the first step and shows two.
 
 For a macOS or Windows computer the Settings step adds **Display recovery**.
-Leave the display alone is the default. On a Mac, Follow the main display or
-Manage a display with BetterDisplay need the approved SSH user; the latter
-reads the Mac's displays over SSH and lets you pick the display, its streaming
-mode, whether to follow the main display, and whether AC power is required.
-On Windows, Managed with the console helper needs an SSH alias for an
-administrator account; Inspect the PC lists its displays, Sunshine's capture
-output, and the helper state, preselects the virtual display, and offers to
-install the helper. The check on the last step then also proves SSH and the
-chosen display, without changing anything on the host.
+New Windows computers default to Match via Sunshine (no SSH) and a saved
+1920x1080 stream. Sunshine must have display configuration enabled and automatic
+resolution switching set to `auto` on the host. Refit requests the window size
+and remembers it; resizing alone scales the picture. Host resolution is shown
+as unverified. An unsupported mode may result in scaled video at an existing
+host resolution or a connection failure. Existing profiles are preserved.
+
+Verified matching (SSH) is optional. Inspect the PC pins Sunshine's configured
+output. Refit in this mode requires recent evidence of the selected output and
+requested host resolution. Missing displays and mismatched captures report an
+error. Managing Virtual Display Driver sizes is a separate unchecked option.
+Other platforms default to Use existing host display. Mac display management
+and Windows console recovery retain their existing SSH requirements.
 
 Continue validates the name, address, and resolution and shows the rule under
 each field that needs attention. The check runs automatically when the last
@@ -147,10 +201,21 @@ with unsaved changes asks before discarding.
 New profiles use the host's existing display and automatic decoder selection.
 Advanced controls expose resolution, frame rate, bitrate in Mbit/s, codec,
 mouse mode (direct or relative pointer), and audio (play here and mute when
-unfocused, always play here, or keep audio on the host), each with a one-line
-explanation. **Edit** changes an existing computer and its default profile;
-other profiles, SSH configuration, host display adapters, and window identity
-are preserved. Changes apply after disconnecting and starting a new connection.
+unfocused, always play here, or play here and on the host), each with a one-line
+explanation. Host playback does not mute local playback. Audio changes apply
+after Disconnect followed by Connect; Reconnect retains the current session
+settings. The resolution field is a combo box: pick a size from the list or
+type any WIDTHxHEIGHT, since Moonlight streams at whatever size is requested
+and Sunshine scales the captured display to match. The list starts with what
+the host was seen to offer, then common sizes: the modes of a display managed
+with BetterDisplay (HiDPI modes also appear at their doubled pixel size), the
+Mac's current main display mode, or the capture display's size on Windows.
+Enable manual Refit opens each connection at its last remembered stream size.
+Refit explicitly restarts at the current window size. Verified matching also
+checks host capture afterwards. The connection view labels requested stream size, negotiated
+video size, and verified host display size separately. Host display size is
+shown as Host resolution unverified without recent launch-scoped Sunshine evidence; a client
+stream size alone never earns a “fits the window” label.
 
 Use `--demo --setup-preview computer` (or `preferences`, `advanced`, `check`)
 to preview each setup page with synthetic data. Demo settings stay in memory.

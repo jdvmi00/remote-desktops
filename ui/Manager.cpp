@@ -30,6 +30,7 @@ Manager::Manager(QString backend, QString socket, bool demo, QObject *parent)
         studio["launched_at"] = now() - 754;
         m_sessions[0] = studio;
         m_available = true; m_loading = false;
+        m_windowRule = QJsonObject{{"available", true}, {"installed", false}, {"manual", false}};
     } else {
         QTimer::singleShot(0, this, &Manager::refresh);
         m_poll.start();
@@ -77,7 +78,40 @@ void Manager::setActive(bool active) {
 }
 void Manager::refresh() {
     if (m_demo) { publish(); return; }
-    loadCatalog(); poll();
+    loadCatalog(); loadWindowRule(); poll();
+}
+QVariantMap Manager::windowRule() const {
+    auto out = m_windowRule.toVariantMap();
+    out["busy"] = m_windowRuleBusy;
+    return out;
+}
+void Manager::loadWindowRule() {
+    process({"--json", "window-rule", "status"}, [this](bool ok, QByteArray bytes) {
+        const auto doc = QJsonDocument::fromJson(bytes);
+        m_windowRule = ok && doc.isObject() ? doc.object() : QJsonObject{{"available", false}};
+        publish();
+    });
+}
+void Manager::setWindowRule(bool tiled) {
+    if (m_windowRuleBusy) return;
+    m_windowRuleBusy = true; m_notice.clear(); m_noticeError = false; publish();
+    if (m_demo) {
+        QTimer::singleShot(350, this, [this, tiled] {
+            m_windowRuleBusy = false; m_windowRule["installed"] = tiled;
+            m_notice = tiled ? "Remote desktops will open tiled in the preview." : "Preview rule removed.";
+            publish();
+        });
+        return;
+    }
+    process({"--json", "window-rule", tiled ? "install" : "remove"}, [this, tiled](bool ok, QByteArray bytes) {
+        m_windowRuleBusy = false;
+        const auto doc = QJsonDocument::fromJson(bytes);
+        if (ok && doc.isObject()) {
+            m_windowRule = doc.object();
+            m_notice = tiled ? "Remote desktops now open tiled. Already open windows keep their state." : "Moonlight windows follow the desktop's default rule again.";
+        } else { m_notice = QString::fromUtf8(bytes).trimmed(); m_noticeError = true; }
+        publish();
+    });
 }
 void Manager::process(QStringList arguments, std::function<void(bool, QByteArray)> complete, QByteArray input, int deadline) {
     auto *job = new QProcess(this);
@@ -163,7 +197,7 @@ void Manager::poll() {
     socket->connectToServer(m_socketPath);
 }
 void Manager::act(QString computer, QString action, QString profile) {
-    static const QSet<QString> allowed{"connect", "disconnect", "reconnect", "restore", "focus", "launcher", "launcher-remove"};
+    static const QSet<QString> allowed{"connect", "disconnect", "reconnect", "refit", "restore", "focus", "launcher", "launcher-remove"};
     if (!allowed.contains(action) || m_busy.contains(computer)) return;
     bool known = false;
     for (const auto &entry : computers()) if (entry.toMap()["computer"].toString() == computer) known = true;
@@ -179,6 +213,7 @@ void Manager::act(QString computer, QString action, QString profile) {
         m_busy.insert(computer); m_notice.clear(); m_noticeError = false; publish();
         QTimer::singleShot(350, this, [this, computer, action, profile, set] {
             m_busy.remove(computer);
+            if (action == "refit") { m_notice = label(computer) + " would refit to its window in the preview."; publish(); return; }
             if (action == "focus" || action == "launcher" || action == "launcher-remove") {
                 if (action == "launcher") m_demoLaunchers.insert(computer);
                 if (action == "launcher-remove") m_demoLaunchers.remove(computer);
@@ -311,7 +346,7 @@ void Manager::setup(QString action, QVariantMap draft) {
                 m_catalog[i] = old; found = true;
             }
             if (!found) m_catalog.append(entry);
-            m_notice = entry["name"].toString() + " was saved. Changes apply to the next new connection."; m_noticeError = false;
+            m_notice = entry["name"].toString() + " was saved. Disconnect, then Connect to apply changes. Reconnect keeps the current session settings."; m_noticeError = false;
         }
         emit setupFinished(action, valid, valid ? document.object().toVariantMap() : QVariantMap{},
                            valid ? QString{} : ok ? "The backend returned invalid settings." : QString::fromUtf8(data).trimmed());
@@ -338,7 +373,11 @@ void Manager::setup(QString action, QVariantMap draft) {
                 m_demoPaired.insert("garage");
                 result = QJsonObject{{"revision", "preview"}, {"paired", QJsonObject{{"paired", true}, {"pairing_uuid", "22222222-3333-4444-5555-666666666666"}, {"name", "Garage PC"}, {"host", draft["host"].toString()}}}};
             } else if (action == "inspect") {
-                if (draft["platform"].toString() == "windows") {
+                if (draft["platform"].toString() == "windows" && draft["adapter"].toString() == "virtual") {
+                    result = QJsonObject{{"platform", "windows"}, {"virtual", QJsonObject{
+                        {"sunshine_output", "{ABCDEF01-1111-2222-3333-444444444444}"}, {"dd_resolution_option", "auto"},
+                        {"modes", QJsonArray{"1920x1080", "2560x1440"}}, {"driver_pipe", true}}}};
+                } else if (draft["platform"].toString() == "windows") {
                     result = QJsonObject{{"platform", "windows"}, {"sunshine_output", "{ABCDEF01-1111-2222-3333-444444444444}"},
                         {"helper", QJsonObject{{"installed", m_demoHelpers.contains(draft["computer"].toString())}, {"phase", "idle"}}},
                         {"displays", QJsonArray{QJsonObject{{"id", "\\\\?\\DISPLAY#MTT1337#5&2c4d1f3&0&UID4352#{e6f07b5f}"}, {"name", "Virtual display"}, {"active", false}, {"available", true}, {"internal", false}, {"hardware", "MTT1337"}, {"width", 2560}, {"height", 1440}},

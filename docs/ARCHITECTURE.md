@@ -163,3 +163,22 @@ transactional by an advisory lock. The fingerprint is a conflict detector, not
 an authentication token. Testing is required by the UI before saving; the CLI
 also permits validated offline saves for scripting. Test results prove only the
 pairing/network/app-list check, not actual streaming performance.
+
+### Optional host display matching
+
+New Windows profiles use the `sunshine` adapter: Moonlight requests the saved
+resolution, with manual Refit and no SSH operations. Host resolution remains
+unverified; unsupported requests can produce scaled video or capture failure.
+Other platforms use the existing host display. Window resizing scales video
+only. Verified Windows matching is the opt-in `virtual` adapter; its historical
+name is retained for compatibility.
+The Python boundary reads bounded, new Sunshine log output over SSH, starting
+from a cursor recorded before launch. Only typed selected-output and capture-size
+evidence enters recovery state. Driver XML contents and negotiated video size
+are not host-resolution evidence. In verified matching, Refit requires fresh verified capture evidence;
+missing output, mismatched resolution, or verification timeout stops acceptance
+of the stream and reports an error. This can detect fallback after launch; it
+does not prevent Sunshine from briefly capturing a fallback before detection.
+No configuration flags are treated as proof that the host applied a mode.
+Driver size-list changes are a separate explicit option. The daemon retains
+session ownership and the helper retains recovery ownership.

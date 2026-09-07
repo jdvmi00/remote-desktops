@@ -36,7 +36,7 @@ else:
         action=request['operation']
         if action=='probe':
             record['resolved']={'client_version':'6.1.0'}
-            result={'argv':['python3','-u',str(Path(__file__).with_name('client.py')),str(path.parent)],'resolved':record['resolved']}
+            result={'argv':['python3','-u',str(Path(__file__).with_name('client.py')),str(path.parent),request.get('stream_resolution') or record['settings'].get('stream_resolution') or ''],'resolved':record['resolved']}
         elif action=='prepare':
             record['journal']={'output':{'original':'1','applied':'2','phase':'intent'}}
             persist()
@@ -53,6 +53,9 @@ else:
             assert request['keep_host_settings'] is True
             record['journal']={}; result={'complete':True}
         elif action=='health':
+            if record['settings'].get('display',{}).get('adapter')=='virtual':
+                record['resolved']['host_display']={'verified':True,'resolution':record.get('stream_resolution','1920x1080'),'checked_at':int(time.time())}
+                persist()
             result={'reconnect':False}
         else:
             raise RuntimeError('unexpected operation')
@@ -64,7 +67,7 @@ CLIENT = r'''
 import os, signal, sys, time
 from pathlib import Path
 directory=Path(sys.argv[1])
-with (directory/'launches').open('a') as log: log.write(str(os.getpid())+'\n')
+with (directory/'launches').open('a') as log: log.write(str(os.getpid())+' '+(sys.argv[2] if len(sys.argv)>2 else '')+'\n')
 def close(*_):
     print('Quit event received',flush=True)
     raise SystemExit(0)
@@ -151,12 +154,15 @@ class BackendTests(unittest.TestCase):
     def session(self, name="laptop"):
         return self.state / "sessions" / name
 
+    def launched(self, name="laptop"):
+        return [line.split()[0] for line in (self.session(name) / "launches").read_text().splitlines()]
+
     def connect(self, name="laptop"):
         self.cli("connect", name)
         self.wait(lambda: self.cli("status", name)["pid"] is not None)
         pid = self.cli("status", name)["pid"]
         launches = self.session(name) / "launches"
-        self.wait(lambda: launches.exists() and str(pid) in launches.read_text().splitlines())
+        self.wait(lambda: launches.exists() and str(pid) in [line.split()[0] for line in launches.read_text().splitlines()])
         return pid
 
     def test_repeat_connect_and_daemon_restart_reuse_the_same_client(self):
@@ -166,7 +172,7 @@ class BackendTests(unittest.TestCase):
         self.stop_daemon()
         self.start()
         self.assertEqual(self.cli("connect", "laptop")["pid"], pid)
-        self.assertEqual(self.session().joinpath("launches").read_text().splitlines(), [str(pid)])
+        self.assertEqual(self.launched(), [str(pid)])
         self.cli("disconnect", "laptop")
         self.wait(lambda: self.cli("status", "laptop")["phase"] == "idle")
         self.assertFalse(self.cli("status", "laptop")["recovery_pending"])
@@ -207,7 +213,7 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(request.returncode, 0, stderr.decode())
             self.assertEqual(json.loads(stdout)["generation"], 1)
         pid = self.connect()
-        self.assertEqual((self.session() / "launches").read_text().splitlines(), [str(pid)])
+        self.assertEqual(self.launched(), [str(pid)])
 
     def test_slow_host_does_not_block_another_computer(self):
         directory = self.session()
@@ -309,7 +315,8 @@ class BackendTests(unittest.TestCase):
         self.assertNotEqual(self.cli("launcher", "remove", "laptop", check=False).returncode, 0)
         self.assertIn("My own launcher", path.read_text())
 
-    def test_workspace_and_geometry_changes_never_place_or_restart_the_window(self):
+    def fake_desktop(self, monitors=None):
+        """A Hyprland stand-in: an event socket plus a hyprctl shim reading clients.json and monitors.json."""
         self.stop_daemon()
         self.env["HYPRLAND_INSTANCE_SIGNATURE"] = "test-instance"
         desktop_path = self.root / "runtime/hypr/test-instance/.socket2.sock"
@@ -324,15 +331,26 @@ class BackendTests(unittest.TestCase):
         clients = self.root / "clients.json"
         calls = self.root / "desktop-calls.jsonl"
         clients.write_text("[]")
+        (self.root / "monitors.json").write_text(json.dumps(monitors or []))
         shim = bins / "hyprctl"
         shim.write_text("#!/usr/bin/env python3\nimport json,sys\nfrom pathlib import Path\n"
                         f"with Path({str(calls)!r}).open('a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\n"
-                        f"print(Path({str(clients)!r}).read_text() if 'clients' in sys.argv else 'ok')\n")
+                        f"root=Path({str(self.root)!r})\n"
+                        "if 'clients' in sys.argv: print((root/'clients.json').read_text())\n"
+                        "elif 'monitors' in sys.argv: print((root/'monitors.json').read_text())\n"
+                        "elif 'general:gaps_out' in sys.argv: print(json.dumps({'option':'general:gaps_out','css':'10 10 10 10','set':True}))\n"
+                        "elif 'general:border_size' in sys.argv: print(json.dumps({'option':'general:border_size','int':2,'set':True}))\n"
+                        "elif 'activewindow' in sys.argv: p=root/'activewindow.json'; print(p.read_text() if p.exists() else '{}')\n"
+                        "else: print('ok')\n")
         shim.chmod(0o755)
         self.env["PATH"] = str(bins) + os.pathsep + self.env["PATH"]
         self.start()
         connection, _ = server.accept()
         self.addCleanup(connection.close)
+        return server, connection, clients, calls
+
+    def test_workspace_and_geometry_changes_never_place_or_restart_the_window(self):
+        server, connection, clients, calls = self.fake_desktop()
         pid = self.connect()
         window = {"address": "0x1", "pid": pid, "stableId": "123", "class": "com.moonlight_stream.Moonlight",
                   "title": "laptop - Moonlight", "mapped": True, "hidden": False, "visible": True,
@@ -378,6 +396,170 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(self.cli("status", "laptop")["pid"], pid)
         self.assertEqual(calls.read_text().count("fullscreen_state"), 2,
                          "only final owned windows receive startup policy")
+
+    def test_connect_launches_at_the_last_known_size_and_never_restarts_to_fit(self):
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        value["computers"]["laptop"]["profiles"]["desktop"]["stream_resolution"] = "auto"
+        config.write_text(json.dumps(value))
+        monitor = {"id": 0, "name": "DP-1", "width": 3840, "height": 2160, "scale": 2, "focused": True, "activeWorkspace": {"id": 1}}
+        server, connection, clients, calls = self.fake_desktop([monitor])
+        launches = self.session() / "launches"
+        sizes = lambda: [line.split()[1] for line in launches.read_text().splitlines()]
+        pid = self.connect()
+        # No memory yet: the connect opens at the saved initial size, and stays there.
+        self.assertEqual(sizes(), ["1920x1080"])
+        self.assertTrue(self.cli("status", "laptop")["fit_window"])
+        self.assertEqual(self.cli("status", "laptop")["resolution"], "1920x1080")
+        window = {"address": "0x1", "pid": pid, "stableId": "123", "class": "com.moonlight_stream.Moonlight",
+                  "title": "laptop - Moonlight", "mapped": True, "hidden": False, "visible": True, "monitor": 0,
+                  "workspace": {"id": 1}, "size": [1200, 800], "floating": False, "fullscreen": 0}
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        # A connect never restarts to fit: the window can differ from the stream and nothing happens.
+        time.sleep(3)
+        self.assertEqual(sizes(), ["1920x1080"])
+        self.assertEqual(self.cli("status", "laptop")["pid"], pid)
+        self.assertEqual(self.cli("status", "laptop")["resolution"], "1920x1080")
+        self.assertFalse(self.cli("status", "laptop")["refit_available"])
+        self.assertIn("refit-unavailable", self.cli("refit", "laptop", check=False).stderr)
+        self.assertEqual(self.cli("status", "laptop")["pid"], pid)
+        self.assertNotIn("move", calls.read_text())
+
+    def test_sunshine_refit_without_verified_host_uses_saved_size(self):
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        value["computers"]["laptop"]["profiles"]["desktop"]["stream_resolution"] = "2560x1440"
+        value["computers"]["laptop"]["profiles"]["desktop"]["display"] = {"adapter": "sunshine"}
+        config.write_text(json.dumps(value))
+        monitor = {"id": 0, "name": "DP-1", "width": 3840, "height": 2160, "scale": 1, "focused": True, "activeWorkspace": {"id": 1}}
+        server, connection, clients, calls = self.fake_desktop([monitor])
+        launches = self.session() / "launches"
+        sizes = lambda: [line.split()[1] for line in launches.read_text().splitlines()]
+        pid = self.connect()
+        self.assertEqual(sizes(), ["2560x1440"])  # Saved size, no memory yet
+        window = {"address": "0x1", "pid": pid, "stableId": "123", "class": "com.moonlight_stream.Moonlight",
+                  "title": "laptop - Moonlight", "mapped": True, "hidden": False, "visible": True, "monitor": 0,
+                  "workspace": {"id": 1}, "size": [1900, 1060], "floating": False, "fullscreen": 0}
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: (self.cli("status", "laptop")["window"] or {}).get("size") == [1900, 1060])
+        # Refit restarts the stream to the window's size and records it.
+        self.assertTrue(self.cli("refit", "laptop")["fit_window"])
+        self.wait(lambda: len(sizes()) == 2 and self.cli("status", "laptop")["pid"] not in (None, pid), timeout=8)
+        self.assertEqual(sizes()[-1], "1900x1060")
+        self.assertFalse(self.cli("status", "laptop").get("host_display", {}).get("verified", False))
+
+    def test_refit_matches_the_window_remembers_it_and_restores_the_workspace(self):
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        value["computers"]["laptop"]["profiles"]["desktop"]["stream_resolution"] = "auto"
+        value["computers"]["laptop"]["profiles"]["desktop"]["display"] = {"adapter": "virtual"}
+        config.write_text(json.dumps(value))
+        monitor = {"id": 0, "name": "DP-1", "width": 3840, "height": 2160, "scale": 1, "focused": True, "activeWorkspace": {"id": 1}}
+        server, connection, clients, calls = self.fake_desktop([monitor])
+        launches = self.session() / "launches"
+        sizes = lambda: [line.split()[1] for line in launches.read_text().splitlines()]
+        pid = self.connect()
+        self.assertEqual(sizes(), ["1920x1080"])  # 1080p default, no memory yet
+        window = {"address": "0x1", "pid": pid, "stableId": "123", "class": "com.moonlight_stream.Moonlight",
+                  "title": "laptop - Moonlight", "mapped": True, "hidden": False, "visible": True, "monitor": 0,
+                  "workspace": {"id": 1}, "size": [1900, 1060], "floating": False, "fullscreen": 0}
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: (self.cli("status", "laptop")["window"] or {}).get("size") == [1900, 1060])
+        # Refit restarts the stream to the window's size and records it.
+        self.assertTrue(self.cli("refit", "laptop")["fit_window"])
+        self.wait(lambda: len(sizes()) == 2 and self.cli("status", "laptop")["pid"] not in (None, pid), timeout=8)
+        self.assertEqual(sizes()[-1], "1900x1060")
+        second = self.cli("status", "laptop")["pid"]
+        window.update(pid=second, address="0x2", stableId="124")
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x2\n")
+        self.wait(lambda: (self.cli("status", "laptop")["window"] or {}).get("size") == [1900, 1060] and self.cli("status", "laptop")["pid"] == second)
+        self.assertEqual(self.cli("status", "laptop")["resolution"], "1900x1060")
+        # Reconnecting to the same spot launches at the remembered size with no restart.
+        self.cli("disconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "idle")
+        clients.write_text("[]")
+        connection.sendall(b"closewindow>>0x2\n")
+        third = self.connect()
+        self.assertEqual(sizes()[-1], "1900x1060")
+        window.update(pid=third, address="0x3", stableId="125", size=[1900, 1060])
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x3\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        time.sleep(2)
+        self.assertEqual(self.cli("status", "laptop")["pid"], third)
+        self.assertEqual(len(sizes()), 3)
+        # Refit with no name targets the focused window; moving it means the restart
+        # reopens it on the active workspace and the daemon returns it to workspace 4.
+        window.update(size=[3000, 1600], workspace={"id": 4})
+        clients.write_text(json.dumps([window]))
+        (self.root / "activewindow.json").write_text(json.dumps({"pid": third, "address": "0x3"}))
+        connection.sendall(b"movewindow>>0x3,4\n")
+        self.wait(lambda: (self.cli("status", "laptop")["window"] or {}).get("size") == [3000, 1600])
+        self.cli("refit")
+        self.wait(lambda: len(sizes()) == 4 and self.cli("status", "laptop")["pid"] not in (None, third), timeout=8)
+        self.assertEqual(sizes()[-1], "3000x1600")
+        fourth = self.cli("status", "laptop")["pid"]
+        window.update(pid=fourth, address="0x4", stableId="126", workspace={"id": 1})
+        clients.write_text(json.dumps([window]))
+        calls.write_text("")
+        connection.sendall(b"openwindow>>0x4\n")
+        self.wait(lambda: "hl.dsp.window.move" in calls.read_text() and "workspace=4" in calls.read_text(), timeout=6)
+        # A fixed-resolution profile cannot be refit.
+        self.cli("disconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "idle")
+        value["computers"]["laptop"]["profiles"]["desktop"]["stream_resolution"] = "1920x1080"
+        config.write_text(json.dumps(value))
+        self.assertNotEqual(self.cli("refit", "laptop", check=False).returncode, 0)
+
+    def test_window_rule_owns_one_block_in_the_hyprland_config(self):
+        config = self.root / "config/hypr/hyprland.lua"
+        config.parent.mkdir(parents=True)
+        # Without a config the status is unavailable and install fails without writing.
+        self.assertFalse(self.cli("window-rule", "status")["available"])
+        self.assertNotEqual(self.cli("window-rule", "install", check=False).returncode, 0)
+        original = 'dofile("boot.lua")\nrequire("hypr.bindings")\n'
+        config.write_text(original)
+        config.chmod(0o644)
+        self.fake_desktop()
+        status = self.cli("window-rule", "install")
+        self.assertTrue(status["installed"] and status["available"] and not status["manual"])
+        text = config.read_text()
+        self.assertTrue(text.startswith(original))
+        self.assertIn('hl.window_rule({ match = { class = "com.moonlight_stream.Moonlight" }, fullscreen = false })', text)
+        self.assertEqual(oct(config.stat().st_mode & 0o777), "0o644")
+        self.assertEqual(config.with_suffix(".lua.remote-desktops.bak").read_text(), original)
+        # Installing again keeps a single block; other later edits survive both ways.
+        self.cli("window-rule", "install")
+        self.assertEqual(config.read_text().count("remote-desktops: begin"), 1)
+        config.write_text(config.read_text() + 'o.window("qemu", { workspace = "5" })\n')
+        self.assertTrue(self.cli("window-rule", "status")["installed"])
+        self.assertFalse(self.cli("window-rule", "remove")["installed"])
+        self.assertEqual(config.read_text(), original + 'o.window("qemu", { workspace = "5" })\n')
+        self.assertFalse(self.cli("window-rule", "remove")["installed"])
+        calls = (self.root / "desktop-calls.jsonl").read_text()
+        self.assertIn('"reload"]', calls)
+        self.assertIn('"configerrors"]', calls)
+        # A hand-written rule is reported, never duplicated or removed.
+        config.write_text(original + 'o.window("com.moonlight_stream.Moonlight", { fullscreen = false })\n')
+        status = self.cli("window-rule", "status")
+        self.assertTrue(status["manual"] and not status["installed"])
+        self.cli("window-rule", "remove")
+        self.assertIn("fullscreen = false", config.read_text())
+
+    def test_fit_window_needs_the_compositor(self):
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        value["computers"]["laptop"]["profiles"]["desktop"]["stream_resolution"] = "auto"
+        config.write_text(json.dumps(value))
+        self.cli("connect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] in ("idle", "attention"))
+        self.assertIn("fit-unavailable", self.cli("status", "laptop")["error"])
+        self.assertFalse((self.session() / "launches").exists())
 
     def daemons(self):
         # Detached daemons started by the CLI are found through their private HOME.
@@ -510,6 +692,25 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse((self.root / "state").exists())
         self.assertTrue(self.cli("catalog")["paired"][0]["configured"])
 
+    def test_audio_settings_round_trip_to_stream_arguments(self):
+        self.cli("save", draft=self.draft())
+        for audio, focus, host in [("continuous", False, False), ("host", False, True), ("focus", True, False)]:
+            with self.subTest(audio=audio):
+                draft = self.cli("get", "home")
+                draft["audio"] = audio
+                self.cli("save", draft=draft)
+                self.assertEqual(self.cli("get", "home")["audio"], audio)
+                c = json.loads(self.config.read_text())["computers"]["home"]
+                result = subprocess.run(
+                    ["python3", "-c", "import json, sys; from remote_desktops.host import stream_argv; "
+                     "c = json.load(sys.stdin); print(json.dumps(stream_argv(c, c['profiles']['desktop'])))"],
+                    input=json.dumps(c), cwd=ROOT, capture_output=True, text=True, check=True, timeout=10)
+                args = json.loads(result.stdout)
+                self.assertIn("--mute-on-focus-loss" if focus else "--no-mute-on-focus-loss", args)
+                self.assertNotIn("--no-mute-on-focus-loss" if focus else "--mute-on-focus-loss", args)
+                self.assertIn("--audio-on-host" if host else "--no-audio-on-host", args)
+                self.assertNotIn("--no-audio-on-host" if host else "--audio-on-host", args)
+
     def test_edits_preserve_other_profiles_display_ssh_and_window_identity(self):
         self.cli("save", draft=self.draft())
         value = json.loads(self.config.read_text())
@@ -608,6 +809,43 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(paired, {"paired": True, "pairing_uuid": "22222222-3333-4444-5555-666666666666", "name": "Garage PC", "host": "garage.tail.ts.net"})
         self.assertTrue(any(c["pairing_uuid"] == paired["pairing_uuid"] for c in self.cli("catalog")["paired"]))
         self.assertFalse((self.root / "state").exists())
+
+    def test_sunshine_without_ssh_survives_check_save_and_reopen(self):
+        draft = self.draft()
+        draft.update(platform="windows", ssh={}, stream_resolution="1920x1080", display={"adapter": "sunshine"})
+        self.assertTrue(self.cli("test", draft=draft)["tested"])
+        self.cli("save", draft=draft)
+        reopened = self.cli("get", "home")
+        self.assertEqual(reopened["display"], {"adapter": "sunshine"})
+        self.assertEqual(reopened["stream_resolution"], "1920x1080")
+
+    def test_sunshine_matching_fields_survive_check_save_and_reopen(self):
+        output = "{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}"
+        reply = {"ok": True, "options": {"output_name": output, "dd_resolution_option": "auto",
+                                        "dd_configuration_option": "ensure_only_display"},
+                 "offset": 0, "created": "fake-log", "text": ""}
+        ssh = self.root / "bin/ssh"
+        ssh.write_text("#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\nprint(" + repr(json.dumps(reply)) + ")\n")
+        ssh.chmod(0o700)
+        draft = self.draft()
+        display = {"adapter": "virtual", "output": output, "sync_modes": True,
+                   "settings": r"D:\VirtualDisplayDriver\vdd_settings.xml", "initial_resolution": "2560x1440"}
+        draft.update(platform="windows", ssh={"alias": "fake-pc"}, stream_resolution="auto", display=display)
+        self.assertTrue(self.cli("test", draft=draft)["tested"])
+        self.cli("save", draft=draft)
+        reopened = self.cli("get", "home")
+        self.assertEqual(reopened["display"], display)
+        self.assertEqual(reopened["stream_resolution"], "auto")
+        reopened["display"]["sync_modes"] = False
+        self.assertTrue(self.cli("test", draft=reopened)["tested"])
+        self.cli("save", draft=reopened)
+        self.assertFalse(self.cli("get", "home")["display"]["sync_modes"])
+        # Switching back to the basic adapter discards matching-only settings.
+        basic = self.cli("get", "home")
+        basic["display"]["adapter"] = "external"
+        basic["stream_resolution"] = "1920x1080"
+        self.cli("save", draft=basic)
+        self.assertEqual(self.cli("get", "home")["display"], {"adapter": "external"})
 
     def test_managed_display_settings_are_editable_and_inspectable(self):
         draft = self.draft()

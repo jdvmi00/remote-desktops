@@ -86,6 +86,8 @@ ApplicationWindow {
         if (selected.desired || phase === "running") f.push({label: "Window", value: selected.window ? "Detected" : phase === "running" ? "Not observed" : "Waiting"})
         const video = selected.evidence ? selected.evidence.negotiated_video : null
         if (video && video.width) f.push({label: "Video stream", value: video.width + " × " + video.height + " · " + video.fps + " fps"})
+        if (selected.desired && selected.resolution) f.push({label: "Requested stream", value: selected.resolution})
+        if (selected.desired) f.push({label: "Host display", value: selected.host_display && selected.host_display.verified ? selected.host_display.resolution + " · verified" : "Host resolution unverified"})
         if (selected.desired && selected.client_version && selected.client_version !== "unknown") f.push({label: "Client", value: "Moonlight " + selected.client_version})
         if (selected.attempts > 0 && selected.next_retry > nowSeconds) f.push({label: "Next attempt", value: "in " + Math.ceil(selected.next_retry - nowSeconds) + " s · attempt " + (selected.attempts + 1) + " of 3"})
         return f
@@ -121,12 +123,13 @@ ApplicationWindow {
     function preview(name) {
         // Demo-only: open a secondary surface for screenshots and smoke tests.
         if (name === "help") help.open()
+        else if (name === "preferences") preferences.open()
         else if (name === "details") details.open()
         else if (name === "remove") removeSelected()
         else if (name === "notice") manager.notify("Studio Mac was added to your app launcher.")
         else if (name === "error") manager.notify("Disconnect this computer before removing it.", true)
     }
-    readonly property bool dialogOpen: setup.opened || help.opened || details.opened || confirm.opened
+    readonly property bool dialogOpen: setup.opened || help.opened || preferences.opened || details.opened || confirm.opened
     Timer { interval: 1000; repeat: true; running: root.connected || (!!root.selected && root.selected.next_retry > root.nowSeconds); onTriggered: root.nowSeconds = Date.now() / 1000 }
     Shortcut { sequence: "Ctrl+R"; onActivated: manager.refresh() }
     Shortcut { sequence: "Ctrl+N"; enabled: !root.dialogOpen && !manager.setupBusy; onActivated: setup.begin("") }
@@ -167,6 +170,7 @@ ApplicationWindow {
                     Tip { visible: chipArea.containsMouse; text: "The background service keeps desktops running after this window closes. Click to check again." }
                 }
                 IconButton { name: "refresh"; hint: "Refresh computers and status · Ctrl+R"; enabled: !manager.loading; onClicked: manager.refresh() }
+                IconButton { name: "sliders"; hint: "Preferences"; onClicked: preferences.open() }
                 IconButton { name: "help"; hint: "Setup & help"; onClicked: help.open() }
             }
         }
@@ -394,6 +398,7 @@ ApplicationWindow {
                                 }
                                 ActionButton { text: "Cancel"; visible: root.transitioning && !!root.selected && !!root.selected.desired; enabled: !!root.selected && !root.selected.busy; hint: "Stop connecting and restore the host"; onClicked: manager.act(root.selected.computer, "disconnect") }
                                 ActionButton { text: "Reconnect"; icon.source: "qrc:/qml/icons/refresh.svg"; visible: root.connected || root.phase === "running"; enabled: !!root.selected && !root.selected.busy && manager.available && !root.transitioning; hint: "Restart the client; recovery settings are kept"; onClicked: manager.act(root.selected.computer, "reconnect") }
+                                ActionButton { text: "Refit"; icon.source: "qrc:/qml/icons/sliders.svg"; visible: (root.connected || root.phase === "running") && !!root.selected ; enabled: !!root.selected && !!root.selected.refit_available && !root.selected.busy && manager.available && !root.transitioning; hint: root.selected && root.selected.refit_available ? "Request the window size from Sunshine; host resolution may remain unchanged" : "Choose Sunshine matching, or complete SSH verification, to use Refit"; onClicked: manager.act(root.selected.computer, "refit") }
                                 Item { Layout.fillWidth: true }
                                 ActionButton { text: "Disconnect"; icon.source: "qrc:/qml/icons/power.svg"; destructive: true; visible: !!root.selected && !!root.selected.desired && !root.transitioning; enabled: !!root.selected && !root.selected.busy && manager.available; hint: "Close the desktop window and restore host settings"; onClicked: manager.act(root.selected.computer, "disconnect") }
                             }
@@ -438,6 +443,33 @@ ApplicationWindow {
     }
     SetupDialog { id: setup; onSaved: computer => { root.selectedId = computer; manager.refresh() } }
     Confirm { id: confirm }
+    Sheet {
+        id: preferences
+        objectName: "preferencesDialog"
+        title: "Preferences"
+        width: Math.min(root.width - 64, 520)
+        readonly property var rule: manager.windowRule || ({})
+        Caption { text: "HYPRLAND" }
+        Check {
+            objectName: "tiledCheck"
+            Layout.fillWidth: true
+            text: "Open remote desktops tiled"
+            checked: !!preferences.rule.installed || !!preferences.rule.manual
+            enabled: !!preferences.rule.available && !preferences.rule.manual && !preferences.rule.busy
+            Accessible.name: "Open remote desktops tiled instead of fullscreen"
+            onToggled: manager.setWindowRule(checked)
+        }
+        Body {
+            Layout.fillWidth: true
+            text: !preferences.rule.available ? "Hyprland's Lua configuration (~/.config/hypr/hyprland.lua) was not found. This option needs Hyprland 0.55 or later."
+                : preferences.rule.manual ? "Your Hyprland configuration already opens Moonlight windows tiled, so there is nothing to add."
+                : "Omarchy opens every Moonlight window fullscreen. This adds a rule to ~/.config/hypr/hyprland.lua so remote desktops open as ordinary tiles, which also lets Fit the window read the tile without a fullscreen flash. The rule applies to any Moonlight window, including ones you start yourself; the usual shortcut still toggles fullscreen."
+        }
+        footer: Sheet.Footer {
+            Item { Layout.fillWidth: true }
+            ActionButton { text: "Close"; primary: true; onClicked: preferences.close() }
+        }
+    }
     Sheet {
         id: help
         objectName: "helpDialog"

@@ -36,6 +36,47 @@ The `windows` adapter uses an already-installed console-session recovery helper,
 an approved `ssh.alias`, and persistent `display.device_id`. These retain the
 configuration rules and recovery behavior from the extracted host adapters.
 
+New Windows computers default to `sunshine` and a saved 1920x1080 stream.
+This adapter requests resolution changes through Moonlight's game-optimization
+flag without SSH. Sunshine must have display configuration enabled and
+`dd_resolution_option = auto` on the host. Refit requests the current window
+size and remembers it. Host resolution remains unverified: unsupported modes
+may leave the host at an existing size with scaled video, or capture may fail.
+Other platforms default to `external`; existing profiles are preserved.
+
+The optional `virtual` adapter (Windows, shown as Verified matching (SSH))
+adds read-only SSH verification. Set `display.output` to the Sunshine display
+GUID selected during inspection and configure Sunshine's `output_name` to it.
+The same automatic resolution configuration is required.
+
+For verified matching, each launch records the Sunshine log position before starting Moonlight. Bounded
+new log output must identify the selected output and confirm the requested host
+resolution. A missing display, wrong resolution, rotated log, or verification
+timeout is an error; fallback capture is not accepted as successful matching.
+Raw host logs are not persisted. The reported host resolution is launch-scoped
+Sunshine evidence, not an independent measurement of every subsequent display
+change. Unsupported log formats remain unverified. In this verified mode, Refit is enabled only for
+`stream_resolution = auto` sessions with recent verified host evidence, and the
+CLI rechecks before restarting.
+
+Driver-specific mode management is separately opt-in: `display.sync_modes = true`
+adds the stream size to `display.settings` (default
+`C:\VirtualDisplayDriver\vdd_settings.xml`) over SSH and requests a driver reload.
+Leave this off for physical monitors and drivers with host-managed modes. The XML
+list alone never verifies the active modes or a successful capture. Existing
+profiles are not migrated; old `virtual` profiles need their capture output
+selected in setup before their next connection.
+
+A profile's `stream_resolution` is either `WIDTHxHEIGHT` or `auto`. With
+`auto` or the `sunshine` adapter the daemon launches at the last known size for the window: the size last
+fitted for that monitor and workspace, or `display.initial_resolution` (falling back to the saved stream resolution, then 1920x1080) the first time.
+A connect never restarts to fit. `refit COMPUTER`, or `refit` for the focused
+Moonlight window, is the only thing that matches the stream to the window: it
+restarts once at the window's current size, remembers it, and returns the window
+to the workspace it was on. `auto` needs Hyprland; elsewhere the connection fails
+with `fit-unavailable`. Status reports the size in use as `resolution` with
+`fit_window`.
+
 Never store passwords, private keys, or pairing certificates in this file.
 
 The graphical manager can set up the managed adapters. For a Mac it needs the
@@ -59,6 +100,9 @@ cargo build --locked --release
 ./target/release/remote-desktops restore macbook
 ./target/release/remote-desktops start
 ./target/release/remote-desktops settings remove macbook
+./target/release/remote-desktops window-rule install   # Moonlight windows open tiled
+./target/release/remote-desktops refit macbook        # refit an auto stream to its window now
+./target/release/remote-desktops refit                # refit the focused Moonlight window
 ./target/release/remote-desktops settings discover
 echo '{"host":"garage.example.net","pin":"1234"}' | ./target/release/remote-desktops --json settings pair
 ```

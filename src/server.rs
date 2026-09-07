@@ -56,6 +56,15 @@ pub struct Session {
     #[serde(default)]
     pub initialized_window: Option<String>,
     pub evidence: Value,
+    /// Concrete stream size for this launch when the profile fits the window.
+    #[serde(default)]
+    pub resolution: Option<String>,
+    /// Window sizes last observed per monitor; the prediction for the next launch.
+    #[serde(default)]
+    pub learned: BTreeMap<String, String>,
+    /// Workspace to return the window to after a refit restart moved it.
+    #[serde(default)]
+    pub refit_workspace: Option<i64>,
 }
 impl Session {
     fn new(computer: &str, profile: &str, config: Value, settings: Value) -> Self {
@@ -81,7 +90,14 @@ impl Session {
             window: None,
             initialized_window: None,
             evidence: json!({}),
+            resolution: None,
+            learned: BTreeMap::new(),
+            refit_workspace: None,
         }
+    }
+    fn fits_window(&self) -> bool {
+        self.settings["stream_resolution"] == "auto"
+            || self.settings["display"]["adapter"] == "sunshine"
     }
 }
 pub struct Manager {
@@ -148,11 +164,24 @@ impl Manager {
                     .is_some_and(|j| !j.is_empty())
             )
         };
+        let observed = &recovery["resolved"]["host_display"];
+        let verified = r.desired
+            && observed["verified"] == true
+            && observed["checked_at"]
+                .as_u64()
+                .is_some_and(|at| now().saturating_sub(at) <= 20);
+        let refit_available = r.fits_window()
+            && (r.settings["display"]["adapter"] == "sunshine"
+                || (r.settings["display"]["adapter"] == "virtual" && verified));
         json!({"computer":r.computer,"profile":r.profile,"desired":r.desired,"phase":r.phase,"error":r.error,
             "generation":r.generation,"pid":if supervisor::alive(&job) {job.pid} else {None},"window":r.window,
             "evidence":r.evidence,"recovery_pending":pending,"recovery_error":recovery_error,
             "resolved":recovery["resolved"],"launcher":crate::launcher::identity(&r.computer,&r.config),
-            "client_version":r.client_version,"launched_at":r.launched_at,"attempts":r.attempts,"next_retry":r.next_retry})
+            "client_version":r.client_version,"launched_at":r.launched_at,"attempts":r.attempts,"next_retry":r.next_retry,
+            "refit_available":refit_available,
+            "refit_reason":if refit_available { "" } else { "Choose Sunshine matching, or verify the host when using verified matching." },
+            "host_display":if verified { observed.clone() } else { json!({"verified":false}) },
+            "fit_window":r.fits_window(),"resolution":r.resolution.clone().or_else(|| r.settings["stream_resolution"].as_str().map(String::from))})
     }
     pub async fn command(self: &Arc<Self>, request: Value) -> Result<Value> {
         let action = request["command"].as_str().context("missing command")?;
@@ -164,6 +193,62 @@ impl Manager {
             return Ok(
                 json!({"version":1,"computers":self.sessions.lock().unwrap().values().map(|r|self.public(r)).collect::<Vec<_>>()}),
             );
+        }
+        if action == "refit" {
+            // Match the stream to the window now and restart at that size. This is
+            // the only thing that fits to the window; a plain connect launches at
+            // the last known size. Named, or the focused Moonlight window when not.
+            let target = if name.is_empty() {
+                self.focused_session()
+                    .await
+                    .context("no focused remote desktop to refit")?
+            } else {
+                name.to_string()
+            };
+            let r = self.get(&target)?;
+            if !r.desired || !r.fits_window() {
+                bail!("refit applies to a connected fit-the-window desktop");
+            }
+            if r.settings["display"]["adapter"] != "virtual"
+                && r.settings["display"]["adapter"] != "sunshine"
+            {
+                bail!("refit-unavailable: configure host display matching first");
+            }
+            if r.settings["display"]["adapter"] == "virtual" {
+                host::operation(&self.paths.session(&target).join("recovery.json"), "health")
+                    .await?;
+            }
+            let r = self.get(&target)?;
+            if !r.desired {
+                bail!("refit-cancelled: the desktop was disconnected");
+            }
+            if self.public(&r)["refit_available"] != true {
+                bail!("refit-unavailable: host display matching has not been verified");
+            }
+            let window = r.window.clone().context("no window to fit yet")?;
+            let monitors = desktop::monitors()
+                .await
+                .context("fit-unavailable: fitting the window needs Hyprland")?;
+            let monitor = monitors
+                .iter()
+                .find(|m| m.id == window.monitor)
+                .or_else(|| monitors.iter().find(|m| m.focused))
+                .context("could not read the window's monitor")?;
+            let observed = desktop::physical(&window.size, monitor.scale)
+                .context("the window is too small to stream")?;
+            self.update(&target, |r| {
+                r.resolution = Some(observed.clone());
+                r.learned.insert(
+                    desktop::fit_key(&monitor.name, window.workspace),
+                    observed.clone(),
+                );
+                r.reconnect = true;
+                r.phase = "reconnecting".into();
+                r.refit_workspace = Some(window.workspace);
+            })?;
+            eprintln!("{target}: refitting the stream to {observed}");
+            self.wake(&target);
+            return Ok(self.public(&self.get(&target)?));
         }
         if !storage::valid_id(name) {
             bail!("invalid computer ID");
@@ -266,6 +351,10 @@ impl Manager {
             }
             let mut record = Session::new(name, &profile, config, settings);
             record.generation = sessions.get(name).map_or(1, |r| r.generation + 1);
+            record.learned = sessions
+                .get(name)
+                .map(|r| r.learned.clone())
+                .unwrap_or_default();
             // Recovery baseline precedes launch intent. Never overwrite a
             // pending journal or an old helper's in-flight write.
             let _recovery_lock = storage::lock(&directory.join("recovery.lock"), true)
@@ -328,6 +417,15 @@ impl Manager {
         }
         self.wake(name);
         Ok(self.public(&self.get(name)?))
+    }
+    async fn focused_session(&self) -> Option<String> {
+        let pid = desktop::active_pid().await.ok().flatten()?;
+        self.sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, r)| r.window.as_ref().is_some_and(|w| w.pid == pid))
+            .map(|(name, _)| name.clone())
     }
     fn start(self: &Arc<Self>, name: &str) {
         let mut wakes = self.wakes.lock().unwrap();
@@ -481,15 +579,52 @@ impl Manager {
                 .filter(supervisor::alive)
                 .filter_map(|job| job.pid)
                 .collect();
+            // A window whose process has already exited is a stale snapshot
+            // entry, not a live view; the compositor drops it moments later.
             if self.windows.borrow().iter().any(|w| {
                 w.class == desktop::CLASS
                     && Some(w.title.as_str()) == r.config["title"].as_str()
                     && !owned_pids.contains(&w.pid)
+                    && std::path::Path::new(&format!("/proc/{}", w.pid)).exists()
             }) {
                 bail!("unmanaged-stream: close the existing Moonlight view first");
             }
-            self.update(name, |r| r.phase = "preflight".into())?;
-            let info = host::operation(&recovery, "probe").await?;
+            let resolution = if r.fits_window() {
+                // Launch at the last known size: a refit target already decided
+                // this launch, otherwise the size last fitted for this monitor and
+                // workspace, otherwise the saved initial size. Refit is the only
+                // thing that matches the window; a connect never restarts to fit.
+                match r.resolution.clone() {
+                    Some(size) => Some(size),
+                    None => {
+                        let (key, size) = desktop::predict(
+                            &r.learned,
+                            r.settings["display"]["initial_resolution"]
+                                .as_str()
+                                .or_else(|| {
+                                    r.settings["stream_resolution"]
+                                        .as_str()
+                                        .filter(|size| *size != "auto")
+                                })
+                                .unwrap_or("1920x1080"),
+                        )
+                        .await
+                        .context("fit-unavailable: fitting the window needs Hyprland")?;
+                        eprintln!("{name}: launching {key} at last known {size}");
+                        Some(size)
+                    }
+                }
+            } else {
+                None
+            };
+            r = self.update(name, |r| {
+                r.phase = "preflight".into();
+                r.resolution = resolution;
+            })?;
+            let info = host::call(
+                json!({"operation":"probe","path":recovery,"stream_resolution":r.resolution}),
+            )
+            .await?;
             if !self.get(name)?.desired {
                 return Ok(Duration::ZERO);
             }
@@ -566,11 +701,19 @@ impl Manager {
                 if r.initialized_window.as_ref() != Some(&key) {
                     // Consume startup policy durably before dispatch: a crash
                     // must not cause a restart to undo a later user choice.
-                    self.update(name, |r| r.initialized_window = Some(key))?;
+                    r = self.update(name, |r| r.initialized_window = Some(key))?;
                     if let Err(e) = desktop::initialize(w, name).await {
                         self.update(name, |r| {
                             r.error = Some(format!("window initialization: {e}"))
                         })?;
+                    }
+                    // A refit restart may reopen the window on the active
+                    // workspace; return it to where the user had put it.
+                    if let Some(ws) = r.refit_workspace {
+                        if w.workspace != ws {
+                            let _ = desktop::action(w, &format!("workspace:{ws}")).await;
+                        }
+                        r = self.update(name, |r| r.refit_workspace = None)?;
                     }
                 }
             }
@@ -581,9 +724,10 @@ impl Manager {
                 let inhibit = policy == "always" || (policy == "visible" && w.visible);
                 let _ = desktop::action(w, if inhibit { "inhibit" } else { "uninhibit" }).await;
             }
-            // Observed geometry is never fed back into placement or resolution.
+            // Observed geometry is never fed back into placement. It only sizes
+            // the stream, once, for profiles that fit the window.
             if window != r.window || r.evidence != job.evidence || r.phase == "connecting" {
-                self.update(name, |r| {
+                r = self.update(name, |r| {
                     r.window = window;
                     r.evidence = job.evidence.clone();
                     r.phase = if r.window.is_some() {
@@ -594,8 +738,10 @@ impl Manager {
                     .into();
                 })?;
             }
+            let delay = Duration::from_secs(10);
             if *health_due <= now()
                 && r.settings["display"]["adapter"] != "external"
+                && r.settings["display"]["adapter"] != "sunshine"
                 && !r.settings["display"].is_null()
             {
                 *health_due = now() + 10;
@@ -627,6 +773,7 @@ impl Manager {
                     Err(e) => return Err(e),
                 }
             }
+            return Ok(delay);
         }
         Ok(Duration::from_secs(10))
     }

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{path::PathBuf, process::Stdio, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     net::UnixStream,
@@ -18,6 +18,29 @@ pub struct Window {
     pub title: String,
     pub visible: bool,
     pub size: Vec<i64>,
+    #[serde(default = "no_monitor")]
+    pub monitor: i64,
+    #[serde(default = "no_monitor")]
+    pub workspace: i64,
+}
+fn no_monitor() -> i64 {
+    -1
+}
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Monitor {
+    pub id: i64,
+    pub name: String,
+    pub width: f64,
+    pub height: f64,
+    pub scale: f64,
+    pub focused: bool,
+    /// The workspace currently shown on this monitor, part of the fit-memory key.
+    pub active_workspace: i64,
+}
+/// Key under which a fitted window size is remembered: a new window lands on the
+/// focused monitor's active workspace, and the tile there is stable per layout.
+pub fn fit_key(monitor: &str, workspace: i64) -> String {
+    format!("{monitor}:{workspace}")
 }
 pub const CLASS: &str = "com.moonlight_stream.Moonlight";
 fn command() -> Command {
@@ -52,9 +75,82 @@ async fn snapshot() -> Result<Vec<Window>> {
                 title: w["title"].as_str()?.into(),
                 visible: w["visible"] == true,
                 size: serde_json::from_value(w["size"].clone()).unwrap_or_default(),
+                monitor: w["monitor"].as_i64().unwrap_or(-1),
+                workspace: w["workspace"]["id"].as_i64().unwrap_or(-1),
             })
         })
         .collect())
+}
+/// Run hyprctl and return its text output.
+pub async fn control(args: &[&str]) -> Result<String> {
+    let output =
+        tokio::time::timeout(Duration::from_secs(5), command().args(args).output()).await??;
+    if !output.status.success() {
+        bail!("Hyprland unavailable");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+async fn query(args: &[&str]) -> Result<Value> {
+    let output =
+        tokio::time::timeout(Duration::from_secs(3), command().args(args).output()).await??;
+    if !output.status.success() {
+        bail!("Hyprland unavailable");
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+/// The pid of the currently focused window, if any.
+pub async fn active_pid() -> Result<Option<u32>> {
+    let value = query(&["-j", "activewindow"]).await?;
+    Ok(value["pid"]
+        .as_u64()
+        .and_then(|p| u32::try_from(p).ok())
+        .filter(|p| *p != 0))
+}
+pub async fn monitors() -> Result<Vec<Monitor>> {
+    let values = query(&["-j", "monitors"]).await?;
+    let monitors: Vec<Monitor> = values
+        .as_array()
+        .context("invalid monitor list")?
+        .iter()
+        .filter_map(|m| {
+            Some(Monitor {
+                id: m["id"].as_i64()?,
+                name: m["name"].as_str()?.into(),
+                width: m["width"].as_f64()?,
+                height: m["height"].as_f64()?,
+                scale: m["scale"].as_f64().filter(|s| *s > 0.0)?,
+                focused: m["focused"] == true,
+                active_workspace: m["activeWorkspace"]["id"].as_i64().unwrap_or(-1),
+            })
+        })
+        .collect();
+    if monitors.is_empty() {
+        bail!("no Hyprland monitors");
+    }
+    Ok(monitors)
+}
+/// Physical pixels of a logical size, rounded to the even dimensions encoders need.
+pub fn physical(size: &[i64], scale: f64) -> Option<String> {
+    let [w, h] = [size.first()?, size.get(1)?].map(|v| ((*v as f64 * scale).round() as i64) & !1);
+    if w < 240 || h < 240 {
+        return None;
+    }
+    Some(format!("{w}x{h}"))
+}
+/// The size to launch a fit stream at: the exact size last fitted for this
+/// monitor and workspace, or the monitor's full size as a first guess that the
+/// one-time correction then trims to the real window. Returns the memory key.
+pub async fn predict(
+    learned: &BTreeMap<String, String>,
+    initial: &str,
+) -> Result<(String, String)> {
+    let monitors = monitors().await?;
+    let monitor = monitors.iter().find(|m| m.focused).unwrap_or(&monitors[0]);
+    let key = fit_key(&monitor.name, monitor.active_workspace);
+    if let Some(known) = learned.get(&key) {
+        return Ok((key, known.clone()));
+    }
+    Ok((key, initial.to_string()))
 }
 pub async fn observe() -> Result<watch::Receiver<Vec<Window>>> {
     let (tx, rx) = watch::channel(Vec::new());
@@ -154,6 +250,15 @@ pub async fn action(window: &Window, action: &str) -> Result<()> {
         "uninhibit" => {
             "hl.dsp.window.set_prop({window='address:'..w.address,prop='idle_inhibit',value='none'})"
         }
+        action if action.starts_with("workspace:") => {
+            // Return the window to the workspace it was on before a refit restart.
+            let id: i64 = action[10..].parse().context("invalid workspace id")?;
+            return dispatch_checked(
+                window,
+                &format!("hl.dsp.window.move({{window='address:'..w.address,workspace={id},follow=false}})"),
+            )
+            .await;
+        }
         _ => bail!("unsupported window action"),
     };
     dispatch_checked(window, dispatch).await
@@ -196,6 +301,14 @@ async fn dispatch_checked(window: &Window, dispatch: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn physical_size_rounds_to_even_and_applies_scale() {
+        assert_eq!(physical(&[1201, 801], 1.0).as_deref(), Some("1200x800"));
+        assert_eq!(physical(&[1200, 800], 1.25).as_deref(), Some("1500x1000"));
+        assert_eq!(physical(&[100, 800], 1.0), None);
+        assert_eq!(physical(&[1200], 1.0), None);
+        assert_eq!(fit_key("DP-1", 4), "DP-1:4");
+    }
     #[test]
     fn lua_strings_never_interpolate_code() {
         assert_eq!(lua_string("'\n"), "\"\\039\\010\"");

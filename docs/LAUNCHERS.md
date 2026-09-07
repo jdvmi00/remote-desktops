@@ -86,9 +86,19 @@ stream window, Remote Desktops assigns its tag and clears internal/client
 fullscreen once. The compositor continues to choose placement and size. A brief
 startup fullscreen transition is possible before the matching event arrives.
 
+`remote-desktops window-rule install` (Preferences in the manager) appends a
+marked block to `~/.config/hypr/hyprland.lua` with a rule that opens Moonlight
+windows tiled. User files load after Omarchy's defaults and the last matching
+anonymous rule wins, so the window opens tiled from the start and the startup
+transition disappears. The block is replaced or removed as a unit, a one-time
+backup of the file is kept beside it, and Hyprland's config check runs after
+every change; a rejected change is undone. A hand-written rule is detected and
+left alone. The rule applies to every Moonlight window, not only managed ones.
+
 There is no ongoing fullscreen or placement correction. User fullscreen choices
 survive repeated opens, workspace changes, and daemon restart. Reconnect creates
-a new stream window with fresh windowed startup. Existing windows adopted from
+a new stream window with fresh windowed startup. A profile whose resolution is `auto` opens at the last known size and does not
+restart on its own; Refit restarts it once to match the current window. Existing windows adopted from
 the older backend are preserved; reconnect once to get their new startup tag.
 
 The startup action is consumed durably before dispatch to avoid replay after a

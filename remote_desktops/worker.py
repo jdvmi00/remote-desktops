@@ -15,8 +15,11 @@ from . import setup
 
 
 def health(record, host):
-    if host.display["adapter"] == "external":
+    if host.display["adapter"] in ("external", "sunshine"):
         return {"reconnect": False}
+    if host.display["adapter"] == "virtual":
+        from . import sunshine_display
+        return sunshine_display.health(record, host)
     observed = host.remote("status" if host.display["adapter"] == "windows" else "probe")
     if host.display["adapter"] == "windows":
         require(not observed.get("error"), observed.get("error"))
@@ -73,14 +76,20 @@ def operation(request):
         action = request["operation"]
         if action == "probe":
             record["resolved"] = {k: v for k, v in host.probe().items() if k != "modes"}
-            result = {"argv": stream_argv(record["config"], record["settings"]), "resolved": record["resolved"]}
+            argv = stream_argv(record["config"], record["settings"], request.get("stream_resolution"))
+            # The size this launch streams at; a display that follows the stream is sized to it in prepare.
+            record["stream_resolution"] = argv[argv.index("--resolution") + 1]
+            result = {"argv": argv, "resolved": record["resolved"]}
         elif action == "prepare":
             prepare(record, host, persist)
             result = {"resolved": record.get("resolved", {})}
         elif action == "restore":
             result = {"complete": restore(record, host, persist)}
         elif action == "health":
-            result = health(record, host)
+            try:
+                result = health(record, host)
+            finally:
+                persist()  # Revoked verification survives a failed observation.
         elif action == "release":
             require(request.get("keep_host_settings") is True, "explicit acknowledgement required")
             record["journal"] = {}

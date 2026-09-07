@@ -19,6 +19,17 @@ AVAHI = ("+;eth0;IPv4;Work\\032PC;_nvstream._tcp;local\n"
 
 
 class SetupTests(unittest.TestCase):
+    def test_virtual_inspection_does_not_query_windows_display_inventory(self):
+        computer = {"platform": "windows", "adapter": "virtual",
+                    "display": {"adapter": "virtual", "settings": r"D:\VDD\vdd_settings.xml"},
+                    "ssh": {"alias": "work-pc"},
+                    "pairing_uuid": "11111111-2222-3333-4444-555555555555"}
+        with patch.object(setup.virtual_display, "inspect", return_value={"modes": ["1920x1080"]}) as virtual, \
+                patch.object(windows_display, "inspect", side_effect=AssertionError("display inventory called")):
+            observed = setup.inspect(computer)
+        virtual.assert_called_once_with("work-pc", computer["pairing_uuid"], computer["display"]["settings"])
+        self.assertEqual(observed, {"platform": "windows", "virtual": {"modes": ["1920x1080"]}})
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

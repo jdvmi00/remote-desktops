@@ -5,6 +5,7 @@ mod server;
 mod settings;
 mod storage;
 mod supervisor;
+mod windowrule;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -36,6 +37,11 @@ enum Action {
         #[command(subcommand)]
         action: launcher::Action,
     },
+    /// Manage the Hyprland rule that opens Moonlight windows tiled.
+    WindowRule {
+        #[command(subcommand)]
+        action: windowrule::Action,
+    },
     Connect {
         computer: String,
         #[arg(long)]
@@ -46,6 +52,10 @@ enum Action {
     },
     Reconnect {
         computer: String,
+    },
+    /// Restart a fit-the-window stream to match the window now (focused if unnamed).
+    Refit {
+        computer: Option<String>,
     },
     Restore {
         computer: String,
@@ -130,6 +140,13 @@ async fn run(cli: Cli) -> Result<()> {
         );
         return Ok(());
     }
+    if let Action::WindowRule { action } = &cli.command {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&windowrule::run(action).await?)?
+        );
+        return Ok(());
+    }
     if let Action::Settings { action } = &cli.command {
         println!(
             "{}",
@@ -159,6 +176,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Action::Disconnect { computer } => json!({"command":"disconnect","computer":computer}),
         Action::Reconnect { computer } => json!({"command":"reconnect","computer":computer}),
+        Action::Refit { computer } => json!({"command":"refit","computer":computer}),
         Action::Restore { computer } => json!({"command":"restore","computer":computer}),
         Action::Release {
             computer,
