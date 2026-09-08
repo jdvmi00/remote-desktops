@@ -280,3 +280,16 @@ Configuration fields: `display_mode: "windowed" | "fullscreen"` and
 a fresh size at launch and does not use manual Refit memory. Startup applies the
 saved fullscreen choice once; subsequent manual toggles and daemon adoption retain
 the user’s current window state.
+
+### Keyboard ownership
+
+Computer settings expose `system_keys` for the selected profile, with an explicit
+Disconnect/Connect hint. New GUI profiles capture shortcuts while focused;
+existing missing policies remain local. The connection view uses the active
+snapshot when showing keyboard guidance.
+
+Preferences includes a shared **Keyboard & local commands** editor, also reachable
+from computer settings. The enable switch, editable prefix, timeout, example,
+conflict messages, stale-draft reload, and discard confirmation are contained in
+one scrollable dialog. Saving invokes `keyboard save` asynchronously; Qt never
+edits compositor files. See [keyboard behavior and validation](KEYBOARD.md).

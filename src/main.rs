@@ -1,5 +1,6 @@
 mod desktop;
 mod host;
+mod keyboard;
 mod launcher;
 mod server;
 mod settings;
@@ -41,6 +42,11 @@ enum Action {
     WindowRule {
         #[command(subcommand)]
         action: windowrule::Action,
+    },
+    /// Configure the local-command prefix on this Hyprland desktop.
+    Keyboard {
+        #[command(subcommand)]
+        action: keyboard::Action,
     },
     Connect {
         computer: String,
@@ -144,6 +150,13 @@ async fn run(cli: Cli) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&windowrule::run(action).await?)?
+        );
+        return Ok(());
+    }
+    if let Action::Keyboard { action } = &cli.command {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&keyboard::run(action).await?)?
         );
         return Ok(());
     }

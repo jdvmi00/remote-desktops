@@ -35,6 +35,7 @@ Sheet {
     property bool attempted: false
     property var touched: ({})
     signal saved(string computer)
+    signal keyboardRequested()
     readonly property var steps: editing ? ["Settings", "Check & save"] : ["Computer", "Settings", "Check & save"]
     readonly property int stepIndex: editing ? step - 1 : step
     readonly property bool dirty: editing ? edited : step > 0 || pairing
@@ -61,6 +62,10 @@ Sheet {
     readonly property var presets: [{label: "Balanced · 1080p, 60 fps", res: "1920x1080", bitrate: 30000}, {label: "Sharper · 1440p, 60 fps", res: "2560x1440", bitrate: 45000}, {label: "Detailed · 4K, 60 fps", res: "3840x2160", bitrate: 80000}, {label: "Custom", res: "", bitrate: 0}]
     readonly property var codecs: [{label: "Automatic", value: "auto"}, {label: "HEVC (H.265)", value: "HEVC"}, {label: "H.264", value: "H.264"}, {label: "AV1", value: "AV1"}]
     readonly property var inputs: [{label: "Direct pointer", value: "absolute", hint: "The pointer lands exactly where you point. Best for desktop work."}, {label: "Relative pointer", value: "relative", hint: "Sends movement only. Needed by games that capture the mouse."}]
+    readonly property var keyboardPolicies: [
+        {label: "Remote desktop while focused", value: "always"},
+        {label: "Remote desktop only in fullscreen", value: "fullscreen"},
+        {label: "Keep system shortcuts on this computer", value: "never"}]
     readonly property var audios: [{label: "Play here, mute when unfocused", value: "focus", hint: "Sound plays on this computer and mutes while the desktop window is not active."}, {label: "Always play here", value: "continuous", hint: "Sound plays on this computer even while the window is in the background."}, {label: "Play here and on the host", value: "host", hint: "Sound plays here even in the background, and host playback stays enabled."}]
     readonly property var adapters: platform === "macos"
         ? [{label: "Use existing host display", value: "external", hint: "Streams the existing desktop. Resizing the window scales the picture; this app does not change the host display."},
@@ -102,7 +107,7 @@ Sheet {
         if (adapter === "virtual") return "Match selected Sunshine display · verified after connecting"
         return "Leaves the host display alone"
     }
-    readonly property var summaryRows: [["Name", draft.name || ""], ["Address", draft.host || ""], ["Operating system", ({macos: "macOS", windows: "Windows", linux: "Linux"})[draft.platform] || "Not specified"], ["Quality", summary()], ["Mouse", valueLabel(inputs, draft.input || "absolute")], ["Audio", valueLabel(audios, draft.audio || "focus")], ["Host display", recoverySummary()]]
+    readonly property var summaryRows: [["Keyboard", valueLabel(keyboardPolicies, draft.system_keys || "never")], ["Name", draft.name || ""], ["Address", draft.host || ""], ["Operating system", ({macos: "macOS", windows: "Windows", linux: "Linux"})[draft.platform] || "Not specified"], ["Quality", summary()], ["Mouse", valueLabel(inputs, draft.input || "absolute")], ["Audio", valueLabel(audios, draft.audio || "focus")], ["Host display", recoverySummary()]]
     function begin(computer) {
         if (manager.setupBusy) return
         editingComputer = computer; discoveryWarning = ""
@@ -153,7 +158,7 @@ Sheet {
         const slug = host.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "computer"
         draft = {computer: slug + "-" + host.pairing_uuid.slice(0, 8), pairing_uuid: host.pairing_uuid,
             revision: revision, name: host.name, host: host.host, platform: platform || "unknown", profile: "desktop",
-            stream_resolution: "1920x1080", fps: 60, bitrate: 30000, codec: "auto", input: "absolute", audio: "focus",
+            stream_resolution: "1920x1080", fps: 60, bitrate: 30000, codec: "auto", input: "absolute", audio: "focus", system_keys: "always",
             ssh: {}, display: {adapter: platform === "windows" ? "sunshine" : "external"}}
         step = 1; pairing = false; tested = false; error = ""; attempted = false; touched = {}; inspection = null
     }
@@ -475,6 +480,25 @@ Sheet {
                 enabled: !manager.setupBusy
                 Layout.fillWidth: true; spacing: 8
                 Body { text: setup.editing ? "Change how this computer connects." : "A few details, then a quick check."; color: theme.colors.text; font.pointSize: theme.type.lead; Layout.bottomMargin: 6 }
+                FieldLabel { text: "Keyboard shortcuts" }
+                Choice {
+                    objectName: "keyboardPolicy"
+                    Layout.fillWidth: true; model: setup.keyboardPolicies; textRole: "label"; valueRole: "value"
+                    currentIndex: Math.max(0, ["always", "fullscreen", "never"].indexOf(setup.draft.system_keys || "never"))
+                    Accessible.name: "Where system keyboard shortcuts go"
+                    onActivated: setup.set("system_keys", currentValue)
+                }
+                Hint {
+                    text: (setup.draft.system_keys || "never") === "never"
+                        ? "Super+Space and other system shortcuts stay here, even when this remote desktop has focus."
+                        : "Super+Space and other system shortcuts control the remote desktop" + (setup.draft.system_keys === "fullscreen" ? " in fullscreen." : " while focused.")
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Hint { Layout.fillWidth: true; text: manager.keyboard.enabled ? "For a local command: " + manager.keyboard.prefix + ", then your usual shortcut." : "Enable a local-command prefix to arrange the remote tile without giving up remote shortcuts." }
+                    ActionButton { quiet: true; text: "Configure prefix…"; onClicked: setup.keyboardRequested() }
+                }
+                Hint { text: "Ctrl+Alt+Shift+Z releases Moonlight capture. Keyboard changes apply after Disconnect, then Connect; Reconnect keeps the current session settings."; Layout.bottomMargin: 12 }
                 FieldLabel { text: "Computer name" }
                 Input { objectName: "setupName"; Layout.fillWidth: true; text: setup.draft.name || ""; maximumLength: 100; invalid: setup.fieldError("name", setup.nameError).length > 0; Accessible.name: "Computer name"; onTextEdited: setup.set("name", text) }
                 Problem { text: setup.fieldError("name", setup.nameError) }
@@ -502,8 +526,8 @@ Sheet {
                                 if (setup.editing) {
                                     const p = setup.draft.profiles[currentText]
                                     setup.set("profile", currentText)
-                                    for (const key of ["stream_resolution", "fps", "bitrate", "codec", "input", "audio", "display_mode"])
-                                        setup.set(key, p[key] === undefined ? ({fps: 60, bitrate: 60000, codec: "HEVC", input: "absolute", audio: "focus", display_mode: "windowed"})[key] : p[key])
+                                    for (const key of ["stream_resolution", "fps", "bitrate", "codec", "input", "audio", "display_mode", "system_keys"])
+                                        setup.set(key, p[key] === undefined ? ({fps: 60, bitrate: 60000, codec: "HEVC", input: "absolute", audio: "focus", display_mode: "windowed", system_keys: "never"})[key] : p[key])
                                     setup.set("display", p.display || {adapter: "external"})
                                 } else if (currentIndex === 3) setup.advanced = true
                                 else {

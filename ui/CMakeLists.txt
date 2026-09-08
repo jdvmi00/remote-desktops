@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 find_package(Qt6 6.4 REQUIRED COMPONENTS Quick QuickControls2 Network Test)
 set(QML_FILES
-    qml/Main.qml qml/SetupDialog.qml qml/ActionButton.qml qml/IconButton.qml qml/Icon.qml qml/Tip.qml
+    qml/Main.qml qml/KeyboardDialog.qml qml/SetupDialog.qml qml/ActionButton.qml qml/IconButton.qml qml/Icon.qml qml/Tip.qml
     qml/Bar.qml qml/Field.qml qml/Check.qml qml/Spin.qml qml/Select.qml qml/Combo.qml qml/StatusDot.qml
     qml/Sheet.qml qml/Confirm.qml qml/Toast.qml qml/ComputerGlyph.qml)
 set(ICON_FILES
@@ -43,7 +43,7 @@ foreach(page pair preferences recovery windows matching advanced check)
     set_tests_properties(qml-setup-${page} PROPERTIES ENVIRONMENT "${TEST_ENVIRONMENT}")
 endforeach()
 
-foreach(surface help details remove notice error)
+foreach(surface help details remove notice error preferences keyboard)
     add_test(NAME qml-dialog-${surface} COMMAND remote-desktops-manager --demo --state idle --dialog ${surface} --smoke-test)
     set_tests_properties(qml-dialog-${surface} PROPERTIES ENVIRONMENT "${TEST_ENVIRONMENT}")
 endforeach()

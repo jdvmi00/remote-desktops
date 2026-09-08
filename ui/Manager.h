@@ -22,6 +22,8 @@ class Manager : public QObject {
     Q_PROPERTY(bool serviceBusy READ serviceBusy NOTIFY changed)
     Q_PROPERTY(bool moonlightAvailable READ moonlightAvailable CONSTANT)
     Q_PROPERTY(bool demo READ demo CONSTANT)
+    Q_PROPERTY(QVariantMap keyboard READ keyboard NOTIFY changed)
+    Q_PROPERTY(bool keyboardBusy READ keyboardBusy NOTIFY changed)
     Q_PROPERTY(QVariantMap windowRule READ windowRule NOTIFY changed)
 public:
     explicit Manager(QString backend, QString socket, bool demo = false, QObject *parent = nullptr);
@@ -46,11 +48,16 @@ public:
     Q_INVOKABLE void notify(QString text, bool error = false);
     Q_INVOKABLE void clearNotice();
     Q_INVOKABLE void demoState(QString phase);
+    QVariantMap keyboard() const { return m_keyboard.toVariantMap(); }
+    bool keyboardBusy() const { return m_keyboardBusy; }
+    Q_INVOKABLE void loadKeyboard();
+    Q_INVOKABLE void saveKeyboard(QVariantMap draft);
     QVariantMap windowRule() const;
     Q_INVOKABLE void setWindowRule(bool tiled);
     void poll();
 signals:
     void changed();
+    void keyboardFinished(bool ok, QString error);
     void setupFinished(QString action, bool ok, QVariantMap result, QString error);
 private:
     void publish();
@@ -61,7 +68,8 @@ private:
     QString m_backend, m_socketPath, m_error, m_notice, m_moonlight;
     bool m_demo, m_loading = true, m_available = false, m_active = true, m_catalogLoading = false;
     bool m_noticeError = false, m_setupBusy = false, m_serviceBusy = false, m_windowRuleBusy = false;
-    QJsonObject m_windowRule;
+    QJsonObject m_windowRule, m_keyboard;
+    bool m_keyboardBusy = false;
     QJsonArray m_catalog, m_sessions;
     QSet<QString> m_busy;
     QMap<QString, QVariantMap> m_demoDrafts;

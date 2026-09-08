@@ -130,6 +130,7 @@ fn editable(id: &str, c: &Value, rev: &str) -> Value {
         "fps":p.get("fps").unwrap_or(&json!(60)),"bitrate":p.get("bitrate").unwrap_or(&json!(60000)),
         "codec":p.get("codec").unwrap_or(&json!("HEVC")),"input":p.get("input").unwrap_or(&json!("absolute")),
         "display_mode":p.get("display_mode").unwrap_or(&json!("windowed")),
+        "system_keys":p.get("system_keys").unwrap_or(&json!("never")),
         "audio":p.get("audio").unwrap_or(&json!("focus"))})
 }
 // Only the common stream settings and display recovery settings cross the UI
@@ -146,6 +147,7 @@ fn redact_profiles(draft: &mut Value) {
                     "input",
                     "audio",
                     "display_mode",
+                    "system_keys",
                     "display",
                 ]
                 .contains(&k.as_str())
@@ -229,6 +231,9 @@ async fn candidate(paths: &Paths, mut value: Value, draft: &Value) -> Result<Val
         .get("display_mode")
         .cloned()
         .unwrap_or_else(|| json!("windowed"));
+    if let Some(keys) = draft.get("system_keys") {
+        computer["profiles"][profile]["system_keys"] = keys.clone();
+    }
     // Optional and defaulted, so a draft that omits it saves a valid boolean.
     computer["profiles"][profile]["follow_window"] =
         json!(draft["follow_window"].as_bool().unwrap_or(false));

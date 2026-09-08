@@ -86,7 +86,7 @@ fn status(path: &PathBuf, text: Option<&str>) -> Result<Value> {
     Ok(json!({"path":path,"available":text.is_some(),
         "installed":installed,"manual":manual(&rest)}))
 }
-fn read(path: &PathBuf) -> Result<Option<String>> {
+pub(crate) fn read(path: &PathBuf) -> Result<Option<String>> {
     match fs::symlink_metadata(path) {
         Ok(m) if m.is_file() => Ok(Some(fs::read_to_string(path)?)),
         Ok(_) => bail!("refusing to edit {}: not a regular file", path.display()),
@@ -110,7 +110,7 @@ fn write(path: &PathBuf, text: &str) -> Result<()> {
 }
 /// Apply a config text, then make sure Hyprland still accepts its config;
 /// otherwise put the previous text back so a broken config never persists.
-async fn apply(path: &PathBuf, previous: &str, next: &str) -> Result<()> {
+pub(crate) async fn apply(path: &PathBuf, previous: &str, next: &str) -> Result<()> {
     let before = desktop::control(&["configerrors"]).await.context(
         "Hyprland is not running; the rule can only be changed inside a Hyprland session",
     )?;

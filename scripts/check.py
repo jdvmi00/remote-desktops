@@ -7,7 +7,7 @@ import sys
 from urllib.parse import unquote, urlsplit
 
 
-TEXT_SUFFIXES = {".md", ".py", ".yml", ".yaml", ".sh", ".ps1", ".toml", ".json", ".rs", ".cs", ".cpp", ".h", ".qml", ".txt"}
+TEXT_SUFFIXES = {".lua", ".md", ".py", ".yml", ".yaml", ".sh", ".ps1", ".toml", ".json", ".rs", ".cs", ".cpp", ".h", ".qml", ".txt"}
 TEXT_NAMES = {"LICENSE", ".gitignore", ".gitattributes"}
 LINK = re.compile(r"\[[^\]\n]*\]\(([^)\n]+)\)")
 

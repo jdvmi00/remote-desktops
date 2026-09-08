@@ -655,6 +655,42 @@ class BackendTests(unittest.TestCase):
         config.write_text(json.dumps(value))
         self.assertNotEqual(self.cli("refit", "laptop", check=False).returncode, 0)
 
+    def test_keyboard_settings_conflicts_revisions_disable_and_rollback(self):
+        config = self.root / "config/hypr/hyprland.lua"
+        config.parent.mkdir(parents=True)
+        original = '-- user configuration\n'
+        config.write_text(original)
+        self.fake_desktop()
+        shim = self.root / "helpers/bin/hyprctl"
+        script = shim.read_text().replace("else: print('ok')", "elif 'binds' in sys.argv: print((root/'binds.json').read_text())\nelif 'configerrors' in sys.argv: print('bad config' if (root/'reject').exists() and 'local-command.lua' in (root/'config/hypr/hyprland.lua').read_text() else '')\nelse: print('ok')")
+        shim.write_text(script)
+        (self.root / 'binds.json').write_text('[]')
+        def save(draft, ok=True):
+            p = subprocess.run([str(BIN), '--json', 'keyboard', 'save'], input=json.dumps(draft), env=self.env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(p.returncode == 0, ok, p.stderr)
+            return json.loads(p.stdout) if ok else p.stderr
+        status = self.cli('keyboard', 'status')
+        draft = {**status, 'enabled': True, 'prefix': 'F12', 'timeout': 5}
+        status = save(draft)
+        self.assertTrue(status['enabled'])
+        self.assertEqual(config.read_text().count('-- remote-desktops: keyboard begin'), 1)
+        installed = config.read_text()
+        self.assertIn('changed elsewhere', save(draft, False))
+        self.assertEqual(config.read_text(), installed)
+        (self.root / 'binds.json').write_text(json.dumps([{'key': 'F11', 'modmask': 0, 'description': 'Existing shortcut'}]))
+        self.assertIn('Existing shortcut', save({**status, 'prefix': 'F11'}, False))
+        self.assertEqual(config.read_text(), installed)
+        # Reject a valid new block during reload and put the old one back.
+        shim.write_text(script.replace("'local-command.lua'", "'install(\"F10\", 5)'"))
+        (self.root / 'reject').touch()
+        self.assertIn('undone', save({**status, 'prefix': 'F10'}, False))
+        self.assertEqual(config.read_text(), installed)
+        status = save({**status, 'enabled': False})
+        self.assertFalse(status['enabled'])
+        self.assertTrue(config.read_text().startswith(original))
+        self.assertNotIn('hl.on(', config.read_text())
+        self.assertEqual(self.cli('keyboard', 'status')['prefix'], 'F12')
+
     def test_window_rule_owns_one_block_in_the_hyprland_config(self):
         config = self.root / "config/hypr/hyprland.lua"
         config.parent.mkdir(parents=True)
@@ -879,6 +915,21 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(result["display_mode"], "fullscreen")
         self.assertEqual(result["stream_resolution"], "monitor")
         self.assertEqual(result["profiles"]["desktop"]["display_mode"], "fullscreen")
+
+    def test_keyboard_policy_round_trip_and_legacy_preservation(self):
+        draft = self.draft()
+        draft["system_keys"] = "always"
+        self.cli("save", draft=draft)
+        result = self.cli("get", "home")
+        self.assertEqual(result["system_keys"], "always")
+        self.assertEqual(result["profiles"]["desktop"]["system_keys"], "always")
+        result.pop("system_keys")  # an older GUI must not erase capture policy
+        self.cli("save", draft=result)
+        self.assertEqual(self.cli("get", "home")["system_keys"], "always")
+        result = self.cli("get", "home")
+        result["system_keys"] = "invalid"
+        self.assertIn("invalid system key capture policy", self.cli("save", draft=result, ok=False))
+        self.assertEqual(self.cli("get", "home")["system_keys"], "always")
 
     def test_audio_settings_round_trip_to_stream_arguments(self):
         self.cli("save", draft=self.draft())
