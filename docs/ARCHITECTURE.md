@@ -201,3 +201,13 @@ after 131,072 bytes or 65,536 characters, including during healthy long sessions
 Incremental parsing needs a separate implementation preserving launch identity,
 partial-write handling, rotation detection, and mismatch revocation. The daemon retains
 session ownership and the helper retains recovery ownership.
+
+## Local-command prefix
+
+An optional embedded compositor Lua module temporarily allows one local keyboard
+combination in the focused managed Moonlight window. Existing compositor bindings
+perform the action; Rust, Qt, and the host helper never receive keyboard events.
+State and cleanup belong to the compositor, independent of daemon and GUI lifetime.
+The Rust `keyboard` command manages installation and editing transactionally;
+per-profile `system_keys` continues to belong to immutable session snapshots.
+See [keyboard configuration and boundaries](KEYBOARD.md).

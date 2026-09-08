@@ -67,6 +67,41 @@ private slots:
         window->close();
         QCOMPARE(m.computers()[1].toMap()["phase"].toString(), QString("window-ready"));
     }
+    void keyboardPreferencesDraftSaveCancelAndProfileEditing() {
+        Manager m("/must-not-run", "/must-not-connect", true);
+        Theme theme("/missing/palette");
+        QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.rootContext()->setContextProperty("manager", &m);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        auto *dialog = window->findChild<QObject *>("keyboardDialog");
+        QVERIFY(dialog); QVERIFY(QMetaObject::invokeMethod(dialog, "begin"));
+        QCOMPARE(dialog->property("prefixDraft").toString(), QString("F12"));
+        QCOMPARE(dialog->property("enabledDraft").toBool(), false);
+        auto *save = dialog->findChild<QObject *>("saveKeyboard");
+        QVERIFY(save); QVERIFY(!save->property("enabled").toBool());
+        dialog->setProperty("enabledDraft", true);
+        dialog->setProperty("prefixDraft", "F11");
+        dialog->setProperty("timeoutDraft", 8);
+        dialog->setProperty("edited", true);
+        QVERIFY(save->property("enabled").toBool());
+        QVERIFY(QMetaObject::invokeMethod(save, "clicked"));
+        QVERIFY(m.keyboardBusy());
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QCOMPARE(m.keyboard()["prefix"].toString(), QString("F11"));
+        QCOMPARE(m.keyboard()["timeout"].toInt(), 8);
+        QVERIFY(m.keyboard()["enabled"].toBool());
+        QVERIFY(QMetaObject::invokeMethod(dialog, "begin"));
+        QCOMPARE(dialog->property("prefixDraft").toString(), QString("F11"));
+        dialog->setProperty("prefixDraft", "F10"); dialog->setProperty("edited", true);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "requestClose"));
+        QVERIFY(dialog->property("visible").toBool()); // discard confirmation, not an implicit save
+        QCOMPARE(m.keyboard()["prefix"].toString(), QString("F11"));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+        QCOMPARE(warnings.count(), 0);
+    }
     void guidedSetupTestGateEditAndCancel() {
         Manager m("/must-not-run", "/must-not-connect", true);
         Theme theme("/missing/palette");

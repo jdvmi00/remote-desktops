@@ -30,6 +30,7 @@ Manager::Manager(QString backend, QString socket, bool demo, QObject *parent)
         studio["launched_at"] = now() - 754;
         m_sessions[0] = studio;
         m_available = true; m_loading = false;
+        m_keyboard = QJsonObject{{"available", true}, {"enabled", false}, {"prefix", "F12"}, {"timeout", 5}, {"revision", "preview"}};
         m_windowRule = QJsonObject{{"available", true}, {"installed", false}, {"manual", false}};
     } else {
         QTimer::singleShot(0, this, &Manager::refresh);
@@ -78,7 +79,34 @@ void Manager::setActive(bool active) {
 }
 void Manager::refresh() {
     if (m_demo) { publish(); return; }
-    loadCatalog(); loadWindowRule(); poll();
+    loadCatalog(); loadWindowRule(); loadKeyboard(); poll();
+}
+void Manager::loadKeyboard() {
+    if (m_demo || m_keyboardBusy) return;
+    m_keyboardBusy = true; publish();
+    process({"--json", "keyboard", "status"}, [this](bool ok, QByteArray bytes) {
+        m_keyboardBusy = false;
+        const auto doc = QJsonDocument::fromJson(bytes);
+        m_keyboard = ok && doc.isObject() ? doc.object() : QJsonObject{{"available", false}, {"error", QString::fromUtf8(bytes).trimmed()}};
+        publish();
+    });
+}
+void Manager::saveKeyboard(QVariantMap draft) {
+    if (m_keyboardBusy) return;
+    m_keyboardBusy = true; publish();
+    if (m_demo) {
+        QTimer::singleShot(100, this, [this, draft] {
+            m_keyboard = QJsonObject::fromVariantMap(draft); m_keyboard["available"] = true;
+            m_keyboardBusy = false; publish(); emit keyboardFinished(true, {});
+        });
+        return;
+    }
+    process({"--json", "keyboard", "save"}, [this](bool ok, QByteArray bytes) {
+        m_keyboardBusy = false;
+        const auto doc = QJsonDocument::fromJson(bytes);
+        if (ok && doc.isObject()) m_keyboard = doc.object();
+        publish(); emit keyboardFinished(ok && doc.isObject(), ok ? QString() : QString::fromUtf8(bytes).trimmed());
+    }, QJsonDocument(QJsonObject::fromVariantMap(draft)).toJson(QJsonDocument::Compact));
 }
 QVariantMap Manager::windowRule() const {
     auto out = m_windowRule.toVariantMap();

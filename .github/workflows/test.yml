@@ -34,12 +34,13 @@ jobs:
           cargo test --locked
           cargo build --locked
       - name: Qt manager dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake qt6-base-dev qt6-declarative-dev qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtquick-window qml6-module-qtqml-workerscript libqt6svg6
+        run: sudo apt-get update && sudo apt-get install -y cmake qt6-base-dev qt6-declarative-dev qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtquick-window qml6-module-qtqml-workerscript libqt6svg6 lua5.4
       - name: Qt manager build and isolated tests
         run: |
           cmake -S ui -B build/ui -DCMAKE_BUILD_TYPE=Release
           cmake --build build/ui --parallel 2
           ctest --test-dir build/ui --output-on-failure
+          lua5.4 tests/local_command.lua
       - name: Host recovery and repository tests
         run: python -m unittest discover -s tests -v
       - name: Standalone daemon integration

@@ -123,13 +123,14 @@ ApplicationWindow {
     function preview(name) {
         // Demo-only: open a secondary surface for screenshots and smoke tests.
         if (name === "help") help.open()
+        else if (name === "keyboard") keyboardSettings.begin()
         else if (name === "preferences") preferences.open()
         else if (name === "details") details.open()
         else if (name === "remove") removeSelected()
         else if (name === "notice") manager.notify("Studio Mac was added to your app launcher.")
         else if (name === "error") manager.notify("Disconnect this computer before removing it.", true)
     }
-    readonly property bool dialogOpen: setup.opened || help.opened || preferences.opened || details.opened || confirm.opened
+    readonly property bool dialogOpen: setup.opened || keyboardSettings.opened || help.opened || preferences.opened || details.opened || confirm.opened
     Timer { interval: 1000; repeat: true; running: root.connected || (!!root.selected && root.selected.next_retry > root.nowSeconds); onTriggered: root.nowSeconds = Date.now() / 1000 }
     Shortcut { sequence: "Ctrl+R"; onActivated: manager.refresh() }
     Shortcut { sequence: "Ctrl+N"; enabled: !root.dialogOpen && !manager.setupBusy; onActivated: setup.begin("") }
@@ -426,6 +427,14 @@ ApplicationWindow {
                                 Label { visible: root.profiles.length === 1; text: root.profile; color: theme.colors.text; font.weight: Font.Medium }
                                 Body { Layout.fillWidth: true; visible: root.profiles.length > 1 && !!root.selected && !!root.selected.desired; text: "Disconnect to change the profile."; font.pointSize: theme.type.caption; color: theme.colors.muted; elide: Text.ElideRight }
                             }
+                            Body {
+                                objectName: "keyboardSessionHint"
+                                Layout.fillWidth: true; Layout.topMargin: 12
+                                visible: root.connected
+                                text: root.selected && root.selected.system_keys === "never" ? "This session keeps system shortcuts local. Edit Keyboard shortcuts to send them to the remote desktop."
+                                    : manager.keyboard.enabled ? "Local command: " + manager.keyboard.prefix + ", then your usual shortcut. Esc cancels."
+                                    : "Release keyboard capture: Ctrl+Alt+Shift+Z. Set up a local-command prefix in Preferences."
+                            }
                             Divider { Layout.topMargin: 22 }
                             Flow {
                                 visible: !!root.selected
@@ -448,7 +457,8 @@ ApplicationWindow {
             }
         }
     }
-    SetupDialog { id: setup; onSaved: computer => { root.selectedId = computer; manager.refresh() } }
+    KeyboardDialog { id: keyboardSettings }
+    SetupDialog { id: setup; onKeyboardRequested: keyboardSettings.begin(); onSaved: computer => { root.selectedId = computer; manager.refresh() } }
     Confirm { id: confirm }
     Sheet {
         id: preferences
@@ -456,6 +466,9 @@ ApplicationWindow {
         title: "Preferences"
         width: Math.min(root.width - 64, 520)
         readonly property var rule: manager.windowRule || ({})
+        ActionButton { objectName: "keyboardPreferences"; Layout.fillWidth: true; text: "Keyboard & local commands…"; onClicked: keyboardSettings.begin() }
+        Body { Layout.fillWidth: true; text: manager.keyboard.enabled ? manager.keyboard.prefix + ", then a local shortcut. Shared by your managed remote desktops." : "Choose how to run local shortcuts while a remote desktop has keyboard focus." }
+        Divider {}
         Caption { text: "HYPRLAND" }
         Check {
             objectName: "tiledCheck"

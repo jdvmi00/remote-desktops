@@ -194,7 +194,7 @@ impl Manager {
             && r.fits_window()
             && (r.settings["display"]["adapter"] == "sunshine"
                 || (r.settings["display"]["adapter"] == "virtual" && verified));
-        json!({"computer":r.computer,"profile":r.profile,"desired":r.desired,"phase":r.phase,"error":r.error,
+        json!({"computer":r.computer,"profile":r.profile,"system_keys":r.settings["system_keys"].as_str().unwrap_or("never"),"desired":r.desired,"phase":r.phase,"error":r.error,
             "generation":r.generation,"pid":if supervisor::alive(&job) {job.pid} else {None},"window":r.window,
             "evidence":r.evidence,"recovery_pending":pending,"recovery_error":recovery_error,
             "resolved":recovery["resolved"],"launcher":crate::launcher::identity(&r.computer,&r.config),
