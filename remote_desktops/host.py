@@ -32,8 +32,8 @@ def require(condition, message):
 
 
 def resolution(value, allow_auto=False):
-    if allow_auto and value == "auto":
-        return value  # Fit the window: the daemon resolves the size at launch.
+    if allow_auto and value in ("auto", "monitor"):
+        return value  # Dynamic size: the daemon resolves window or monitor pixels at launch.
     require(isinstance(value, str) and re.fullmatch(r"\d{3,5}x\d{3,5}", value), "resolution must be WIDTHxHEIGHT")
     require(all(240 <= int(n) <= 16384 for n in value.split("x")), "resolution outside supported range")
     return value
@@ -70,6 +70,7 @@ def configuration_value(value):
             require(type(p.get("fps", 60)) is int and 20 <= p.get("fps", 60) <= 240, "invalid FPS")
             require(type(p.get("bitrate", 60000)) is int and 1000 <= p.get("bitrate", 60000) <= 200000, "invalid bitrate")
             require(p.get("codec", "HEVC") in ("HEVC", "H.264", "AV1", "auto"), "invalid codec")
+            require(p.get("display_mode", "windowed") in ("windowed", "fullscreen"), "invalid display mode")
             require(p.get("audio", "focus") in ("focus", "continuous", "host"), "invalid audio policy")
             require(p.get("input", "absolute") in ("absolute", "relative"), "invalid input policy")
             require(p.get("system_keys", "never") in ("never", "fullscreen", "always"), "invalid system key capture policy")
@@ -339,12 +340,12 @@ def restore(record, host, persist, fields=("mode", "output")):
 
 def stream_argv(computer, p, fitted=None):
     size = fitted or p["stream_resolution"]
-    require(size != "auto", "resolution-required: the window size was not resolved before launch")
+    require(size not in ("auto", "monitor"), "resolution-required: the window size was not resolved before launch")
     # Sunshine requires the client optimization flag to apply its automatic
     # display resolution. Other adapters retain ownership of their host modes.
     follows_stream = computer.get("platform") == "windows" and p.get("display", {}).get("adapter") in ("virtual", "sunshine")
     return ["moonlight", "stream", "--resolution", resolution(size), "--fps", str(p.get("fps", 60)),
-            "--bitrate", str(p.get("bitrate", 60000)), "--display-mode", "windowed",
+            "--bitrate", str(p.get("bitrate", 60000)), "--display-mode", p.get("display_mode", "windowed"),
             "--absolute-mouse" if p.get("input", "absolute") == "absolute" else "--no-absolute-mouse",
             "--capture-system-keys", p.get("system_keys", "never"), "--no-quit-after",
             "--game-optimization" if follows_stream else "--no-game-optimization",

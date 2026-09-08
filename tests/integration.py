@@ -461,6 +461,33 @@ class BackendTests(unittest.TestCase):
         self.addCleanup(connection.close)
         return server, connection, clients, calls
 
+    def test_fullscreen_monitor_launch_and_adoption(self):
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        value["computers"]["laptop"]["profiles"]["desktop"].update(
+            display_mode="fullscreen", stream_resolution="monitor")
+        config.write_text(json.dumps(value))
+        server, connection, clients, calls = self.fake_desktop([
+            {"id": 0, "name": "test", "width": 6144, "height": 2560,
+             "scale": 2, "focused": True, "activeWorkspace": {"id": 1}}])
+        pid = self.connect()
+        self.assertEqual(self.cli("status", "laptop")["resolution"], "6144x2560")
+        window = {"address": "0x1", "pid": pid, "stableId": "123",
+                  "class": "com.moonlight_stream.Moonlight", "title": "laptop - Moonlight",
+                  "mapped": True, "hidden": False, "visible": True,
+                  "workspace": {"id": 1}, "size": [3072, 1280]}
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        self.assertIn("internal=2,client=2", calls.read_text())
+        self.stop_daemon()
+        connection.close()
+        self.start()
+        replacement, _ = server.accept()
+        self.addCleanup(replacement.close)
+        self.assertEqual(self.cli("open", "laptop")["pid"], pid)
+        self.assertEqual(calls.read_text().count("fullscreen_state"), 1)
+
     def test_workspace_and_geometry_changes_never_place_or_restart_the_window(self):
         server, connection, clients, calls = self.fake_desktop()
         pid = self.connect()
@@ -842,6 +869,16 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse((self.root / "runtime").exists())
         self.assertFalse((self.root / "state").exists())
         self.assertTrue(self.cli("catalog")["paired"][0]["configured"])
+
+    def test_fullscreen_settings_round_trip(self):
+        draft = self.draft()
+        draft.update(display_mode="fullscreen", stream_resolution="monitor")
+        self.assertTrue(self.cli("test", draft=draft)["tested"])
+        self.cli("save", draft=draft)
+        result = self.cli("get", "home")
+        self.assertEqual(result["display_mode"], "fullscreen")
+        self.assertEqual(result["stream_resolution"], "monitor")
+        self.assertEqual(result["profiles"]["desktop"]["display_mode"], "fullscreen")
 
     def test_audio_settings_round_trip_to_stream_arguments(self):
         self.cli("save", draft=self.draft())

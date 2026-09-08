@@ -129,6 +129,31 @@ pub async fn monitors() -> Result<Vec<Monitor>> {
     }
     Ok(monitors)
 }
+/// Full physical resolution of the focused monitor, without subtracting bars or gaps.
+pub async fn full_monitor_resolution() -> Result<String> {
+    let values = query(&["-j", "monitors"]).await?;
+    let monitor = values
+        .as_array()
+        .context("invalid monitor list")?
+        .iter()
+        .find(|m| m["focused"] == true)
+        .context("no focused monitor")?;
+    monitor_resolution(monitor)
+}
+fn monitor_resolution(monitor: &Value) -> Result<String> {
+    let mut width = monitor["width"].as_i64().context("invalid monitor width")?;
+    let mut height = monitor["height"]
+        .as_i64()
+        .context("invalid monitor height")?;
+    if monitor["transform"].as_i64().unwrap_or(0) % 2 != 0 {
+        std::mem::swap(&mut width, &mut height);
+    }
+    if !(240..=16384).contains(&width) || !(240..=16384).contains(&height) {
+        bail!("monitor resolution outside supported range");
+    }
+    physical(&[width, height], 1.0).context("invalid monitor resolution")
+}
+
 /// Physical pixels of a logical size, rounded to the even dimensions encoders need.
 pub fn physical(size: &[i64], scale: f64) -> Option<String> {
     let [w, h] = [size.first()?, size.get(1)?].map(|v| ((*v as f64 * scale).round() as i64) & !1);
@@ -263,14 +288,15 @@ pub async fn action(window: &Window, action: &str) -> Result<()> {
     };
     dispatch_checked(window, dispatch).await
 }
-pub async fn initialize(window: &Window, computer: &str) -> Result<()> {
+pub async fn initialize(window: &Window, computer: &str, fullscreen: bool) -> Result<()> {
     let tag = lua_string(&format!("+remote-desktops-{computer}"));
     dispatch_checked(
         window,
         &format!("hl.dsp.window.tag({{window='address:'..w.address,tag={tag}}})"),
     )
     .await?;
-    dispatch_checked(window, "hl.dsp.window.fullscreen_state({window='address:'..w.address,internal=0,client=0,action='set'})").await
+    let mode = if fullscreen { 2 } else { 0 };
+    dispatch_checked(window, &format!("hl.dsp.window.fullscreen_state({{window='address:'..w.address,internal={mode},client={mode},action='set'}})")).await
 }
 async fn dispatch_checked(window: &Window, dispatch: &str) -> Result<()> {
     // Revalidate all identity fields inside the compositor, atomically with
@@ -308,6 +334,15 @@ mod tests {
         assert_eq!(physical(&[100, 800], 1.0), None);
         assert_eq!(physical(&[1200], 1.0), None);
         assert_eq!(fit_key("DP-1", 4), "DP-1:4");
+    }
+    #[test]
+    fn full_monitor_uses_physical_pixels_and_rotation() {
+        let mut m = serde_json::json!({"width":6144,"height":2560,"scale":2.0,"transform":0});
+        assert_eq!(monitor_resolution(&m).unwrap(), "6144x2560");
+        m["transform"] = serde_json::json!(1);
+        assert_eq!(monitor_resolution(&m).unwrap(), "2560x6144");
+        m["width"] = serde_json::json!(0);
+        assert!(monitor_resolution(&m).is_err());
     }
     #[test]
     fn lua_strings_never_interpolate_code() {

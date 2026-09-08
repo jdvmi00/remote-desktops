@@ -6,8 +6,9 @@ uses its current Lua dispatch and stable window IDs, without any Hypertile Lua
 module. The Rust toolchain is pinned in `rust-toolchain.toml`.
 
 Omarchy ships a Moonlight rule that requests fullscreen even with
-`--display-mode windowed`. The backend now clears fullscreen once on the first
-matched window of a new stream. Later user fullscreen choices are preserved.
+`--display-mode windowed`. Profiles default to windowed mode and can select
+`display_mode: "fullscreen"`. The backend applies that saved choice once on the
+first matched window of a new stream. Later user fullscreen choices are preserved.
 See [launchers](LAUNCHERS.md) for identity and startup details.
 
 ## Configuration
