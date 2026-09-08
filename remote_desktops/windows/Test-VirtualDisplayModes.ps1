@@ -1,4 +1,27 @@
 # Native PowerShell algorithm tests: only temporary XML and a synthetic named pipe.
+# Drain concurrently: a synchronous client write can wait for the server's read
+# on Windows even for a small payload. Do not run PowerShell on a worker thread.
+Add-Type -TypeDefinition @'
+using System;
+using System.IO.Pipes;
+using System.Text;
+using System.Threading.Tasks;
+public static class TestModeReloadReceiver {
+ public static Task<string> Receive(NamedPipeServerStream server) {
+  return Task.Run(() => {
+   server.WaitForConnection();
+   var buffer = new byte[13];
+   var count = 0;
+   while (count < buffer.Length) {
+    var read = server.Read(buffer, count, buffer.Length - count);
+    if (read == 0) break;
+    count += read;
+   }
+   return Encoding.ASCII.GetString(buffer, 0, count);
+  });
+ }
+}
+'@
 $folder=Join-Path ([IO.Path]::GetTempPath()) ('remote-desktops-modes-'+[guid]::NewGuid().ToString('N'))
 $null=New-Item -ItemType Directory -Path $folder
 $Settings=Join-Path $folder 'settings.xml'
@@ -10,15 +33,12 @@ function Invoke-TestSync([bool]$Listening) {
  try {
   if ($Listening) {
    $server=[IO.Pipes.NamedPipeServerStream]::new($Pipe,[IO.Pipes.PipeDirection]::In,1,[IO.Pipes.PipeTransmissionMode]::Byte,[IO.Pipes.PipeOptions]::Asynchronous)
-   $waiting=$server.BeginWaitForConnection($null,$null)
+   $receiver=[TestModeReloadReceiver]::Receive($server)
   }
   $result=(& $script | ConvertFrom-Json)
   if ($Listening -and $result.ok) {
-   if (-not $waiting.AsyncWaitHandle.WaitOne(5000)) {throw 'Test pipe was not contacted'}
-   $server.EndWaitForConnection($waiting)
-   $buffer=New-Object byte[] 13
-   $read=$server.Read($buffer,0,$buffer.Length)
-   if ([Text.Encoding]::ASCII.GetString($buffer,0,$read) -ne 'RELOAD_DRIVER') {throw 'Unexpected reload command'}
+   if (-not $receiver.Wait(5000)) {throw 'Test pipe did not receive the reload command'}
+   if ($receiver.Result -ne 'RELOAD_DRIVER') {throw 'Unexpected reload command'}
   }
   return $result
  } finally {if ($null -ne $server) {$server.Dispose()}}
