@@ -291,6 +291,48 @@ printf '%s\n' '[{"computer":"retry-pc","profiles":["desktop"]}]'
         m.act("studio", "release"); // No implicit abandonment of recovery.
         QVERIFY(!m.computers()[0].toMap()["busy"].toBool());
     }
+    void refitRequiresBackendCapability() {
+        QTemporaryDir temp;
+        QFile script(temp.path() + "/backend");
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write("#!/bin/sh\nprintf '[]\\n'\n");
+        script.close();
+        script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        QLocalServer server;
+        QVERIFY(server.listen(temp.path() + "/control.sock"));
+        QJsonObject session{{"computer", "test"}, {"platform", "macos"}, {"phase", "window-ready"},
+            {"desired", true}, {"window", QJsonObject{{"address", "fake"}}}};
+        connect(&server, &QLocalServer::newConnection, this, [&] {
+            auto *socket = server.nextPendingConnection();
+            connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
+            connect(socket, &QLocalSocket::readyRead, socket, [&, socket] {
+                socket->readAll();
+                socket->write(QJsonDocument(QJsonObject{{"ok", true}, {"result", QJsonObject{{"computers", QJsonArray{session}}}}}).toJson(QJsonDocument::Compact) + "\n");
+            });
+        });
+        Manager m(script.fileName(), server.fullServerName());
+        QTRY_VERIFY(m.available());
+        Theme theme("/missing/palette");
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("manager", &m);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        auto *refit = window->findChild<QObject *>("refitAction");
+        QVERIFY(refit);
+        QVERIFY(!refit->property("visible").toBool()); // Older status replies cannot authorize Refit.
+        session["platform"] = "windows";
+        session["refit_available"] = true;
+        m.poll();
+        QTRY_VERIFY(refit->property("visible").toBool());
+        QVERIFY(refit->property("enabled").toBool());
+        session["refit_available"] = false;
+        m.poll();
+        QTRY_VERIFY(!refit->property("visible").toBool()); // Verification can expire while connected.
+        QVERIFY(!refit->property("enabled").toBool());
+        window->close();
+    }
     void statusIsFramedAndStaleRecordsSurvive() {
         QTemporaryDir temp;
         auto binary = temp.path() + "/backend";
@@ -455,6 +497,68 @@ fi
         QCOMPARE(warnings.count(), 0);
         window->close();
     }
+    void sharedHostSetup_data() {
+        QTest::addColumn<QString>("platform");
+        QTest::addColumn<QString>("adapter");
+        QTest::addColumn<bool>("editing");
+        for (const auto &adapter : {QString("macos"), QString("betterdisplay"), QString("windows"), QString("virtual")}) {
+            const QString platform = adapter == "macos" || adapter == "betterdisplay" ? "macos" : "windows";
+            for (bool editing : {false, true})
+                QTest::newRow(qPrintable(adapter + (editing ? "-edit" : "-add"))) << platform << adapter << editing;
+        }
+    }
+    void sharedHostSetup() {
+        QFETCH(QString, platform);
+        QFETCH(QString, adapter);
+        QFETCH(bool, editing);
+        Manager m("/missing", "/missing", true);
+        Theme theme("/missing/palette");
+        QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.rootContext()->setContextProperty("manager", &m);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        auto *dialog = window->findChild<QObject *>("setupDialog");
+        const QString computer = platform == "macos" ? "studio" : "work";
+        QVERIFY(QMetaObject::invokeMethod(dialog, "begin", Q_ARG(QVariant, QVariant(editing ? computer : ""))));
+        QTRY_VERIFY(dialog->property("loaded").toBool());
+        QTRY_VERIFY(!m.setupBusy());
+        if (!editing) {
+            QVariantMap host{{"name", "Test host"}, {"host", "host.example.net"}, {"pairing_uuid", "11111111-2222-3333-4444-555555555555"}};
+            QVERIFY(QMetaObject::invokeMethod(dialog, "choose", Q_ARG(QVariant, QVariant(host)), Q_ARG(QVariant, QVariant(platform))));
+        }
+        QVERIFY(QMetaObject::invokeMethod(dialog, "setAdapter", Q_ARG(QVariant, QVariant(adapter))));
+        const auto buttons = dialog->findChildren<QObject *>("setupInspect");
+        QCOMPARE(buttons.size(), 1); // Both platforms use the same action, including main-display following.
+        auto *inspect = buttons.first();
+        QVERIFY(inspect->property("visible").toBool());
+        QVERIFY(!inspect->property("enabled").toBool());
+        QCOMPARE(inspect->property("text").toString(), QString("Inspect host"));
+        QCOMPARE(dialog->findChild<QObject *>("setupSshUser")->property("visible").toBool(), platform == "macos");
+        QCOMPARE(dialog->findChild<QObject *>("setupSshAlias")->property("visible").toBool(), platform == "windows");
+        QVERIFY(QMetaObject::invokeMethod(dialog, "setNested", Q_ARG(QVariant, QVariant("ssh")), Q_ARG(QVariant, QVariant(platform == "macos" ? "user" : "alias")), Q_ARG(QVariant, QVariant("test-host"))));
+        QVERIFY(inspect->property("enabled").toBool());
+        QVERIFY(QMetaObject::invokeMethod(inspect, "clicked"));
+        QTRY_VERIFY(!dialog->property("inspection").toMap().isEmpty());
+        QCOMPARE(inspect->property("text").toString(), QString("Inspect again"));
+        QVERIFY(dialog->property("valid").toBool());
+        if (adapter == "macos") {
+            QVERIFY(dialog->property("resolutions").toStringList().contains("5120x2880"));
+            QVERIFY(!dialog->property("draft").toMap()["display"].toMap().contains("mode"));
+        }
+        dialog->setProperty("advanced", true);
+        QCOMPARE(dialog->findChild<QObject *>("setupFitWindow")->property("visible").toBool(), adapter == "virtual");
+        QVERIFY(dialog->findChild<QObject *>("setupResolution")->property("visible").toBool());
+        // Changing identity revokes the inventory and restores the common inspection action.
+        QVERIFY(QMetaObject::invokeMethod(dialog, "set", Q_ARG(QVariant, QVariant("host")), Q_ARG(QVariant, QVariant("other.example.net"))));
+        QVERIFY(dialog->property("inspection").toMap().isEmpty());
+        QCOMPARE(inspect->property("text").toString(), QString("Inspect host"));
+        QTest::qWait(100); // Exercise the deferred inspection scroll for each adapter.
+        QCOMPARE(warnings.count(), 0);
+        window->close();
+    }
     void resolutionIsPickedFromTheHostOrTyped() {
         Manager m("/missing", "/missing", true);
         Theme theme("/missing/palette");
@@ -509,6 +613,21 @@ fi
         QVERIFY(QMetaObject::invokeMethod(dialog, "set", Q_ARG(QVariant, QVariant("stream_resolution")), Q_ARG(QVariant, QVariant("3840x2160"))));
         QCOMPARE(field->property("editText").toString(), QString("3840x2160"));
         QCOMPARE(field->property("currentIndex").toInt(), 3);
+        // Fullscreen and native monitor size are shared connection settings.
+        auto *fullscreen = dialog->findChild<QObject *>("setupFullscreen");
+        auto *monitor = dialog->findChild<QObject *>("setupMatchMonitor");
+        QVERIFY(fullscreen);
+        QVERIFY(monitor);
+        fullscreen->setProperty("checked", true);
+        QVERIFY(QMetaObject::invokeMethod(fullscreen, "toggled"));
+        monitor->setProperty("checked", true);
+        QVERIFY(QMetaObject::invokeMethod(monitor, "toggled"));
+        QCOMPARE(dialog->property("draft").toMap()["display_mode"].toString(), QString("fullscreen"));
+        QCOMPARE(dialog->property("draft").toMap()["stream_resolution"].toString(), QString("monitor"));
+        QVERIFY(!field->property("enabled").toBool());
+        monitor->setProperty("checked", false);
+        QVERIFY(QMetaObject::invokeMethod(monitor, "toggled"));
+        QCOMPARE(dialog->property("draft").toMap()["stream_resolution"].toString(), QString("3840x2160"));
         // An inspected Mac display offers its modes first, with HiDPI modes doubled to their pixel size.
         QVERIFY(QMetaObject::invokeMethod(dialog, "setAdapter", Q_ARG(QVariant, QVariant("betterdisplay"))));
         QVERIFY(QMetaObject::invokeMethod(dialog, "setNested", Q_ARG(QVariant, QVariant("ssh")), Q_ARG(QVariant, QVariant("user")), Q_ARG(QVariant, QVariant("streamer"))));

@@ -129,6 +129,7 @@ fn editable(id: &str, c: &Value, rev: &str) -> Value {
         "profile":profile,"profiles":c["profiles"],"stream_resolution":p["stream_resolution"],
         "fps":p.get("fps").unwrap_or(&json!(60)),"bitrate":p.get("bitrate").unwrap_or(&json!(60000)),
         "codec":p.get("codec").unwrap_or(&json!("HEVC")),"input":p.get("input").unwrap_or(&json!("absolute")),
+        "display_mode":p.get("display_mode").unwrap_or(&json!("windowed")),
         "audio":p.get("audio").unwrap_or(&json!("focus"))})
 }
 // Only the common stream settings and display recovery settings cross the UI
@@ -144,6 +145,7 @@ fn redact_profiles(draft: &mut Value) {
                     "codec",
                     "input",
                     "audio",
+                    "display_mode",
                     "display",
                 ]
                 .contains(&k.as_str())
@@ -223,6 +225,10 @@ async fn candidate(paths: &Paths, mut value: Value, draft: &Value) -> Result<Val
     ] {
         computer["profiles"][profile][key] = draft[key].clone();
     }
+    computer["profiles"][profile]["display_mode"] = draft
+        .get("display_mode")
+        .cloned()
+        .unwrap_or_else(|| json!("windowed"));
     // Optional and defaulted, so a draft that omits it saves a valid boolean.
     computer["profiles"][profile]["follow_window"] =
         json!(draft["follow_window"].as_bool().unwrap_or(false));

@@ -614,7 +614,9 @@ impl Manager {
             }) {
                 bail!("unmanaged-stream: close the existing Moonlight view first");
             }
-            let resolution = if r.fits_window() {
+            let resolution = if r.settings["stream_resolution"] == "monitor" {
+                Some(desktop::full_monitor_resolution().await.context("monitor-resolution-unavailable: choose a fixed resolution when Hyprland is unavailable")?)
+            } else if r.fits_window() {
                 // Launch at the last known size: a refit target already decided
                 // this launch, otherwise the size last fitted for this monitor and
                 // workspace, otherwise the saved initial size. Refit is the only
@@ -740,7 +742,10 @@ impl Manager {
                     r = self
                         .update(name, |r| r.initialized_window = Some(key))
                         .await?;
-                    if let Err(e) = desktop::initialize(w, name).await {
+                    if let Err(e) =
+                        desktop::initialize(w, name, r.settings["display_mode"] == "fullscreen")
+                            .await
+                    {
                         self.update(name, |r| {
                             r.error = Some(format!("window initialization: {e}"))
                         })

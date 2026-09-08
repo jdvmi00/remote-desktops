@@ -355,6 +355,22 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 s.configuration(self.config)
 
+    def test_fullscreen_monitor_profile_and_legacy_windowed_default(self):
+        c = computer()
+        p = c["profiles"]["desktop"]
+        args = s.stream_argv(c, p)
+        self.assertEqual(args[args.index("--display-mode") + 1], "windowed")
+        p.update(display_mode="fullscreen", stream_resolution="monitor")
+        s.configuration_value({"version": 1, "computers": {"laptop": c}})
+        with self.assertRaisesRegex(ValueError, "resolution-required"):
+            s.stream_argv(c, p)
+        args = s.stream_argv(c, p, "6144x2560")
+        self.assertEqual(args[args.index("--display-mode") + 1], "fullscreen")
+        self.assertEqual(args[args.index("--resolution") + 1], "6144x2560")
+        p["display_mode"] = "invalid"
+        with self.assertRaisesRegex(ValueError, "invalid display mode"):
+            s.configuration_value({"version": 1, "computers": {"laptop": c}})
+
     def test_fit_window_profiles_validate_and_need_a_resolved_size(self):
         c = computer()
         c["profiles"]["desktop"]["stream_resolution"] = "auto"

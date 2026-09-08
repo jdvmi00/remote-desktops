@@ -173,7 +173,7 @@ name, address, and platform already filled in.
 Steps are shown with completed, current, and upcoming markers; editing an
 existing computer skips the first step and shows two.
 
-For a macOS or Windows computer the Settings step adds **Display recovery**.
+For a macOS or Windows computer the Settings step adds **Host display (optional)**.
 New Windows computers default to Match via Sunshine (no SSH) and a saved
 1920x1080 stream. Sunshine must have display configuration enabled and automatic
 resolution switching set to `auto` on the host. Refit requests the window size
@@ -181,7 +181,7 @@ and remembers it; resizing alone scales the picture. Host resolution is shown
 as unverified. An unsupported mode may result in scaled video at an existing
 host resolution or a connection failure. Existing profiles are preserved.
 
-Verified matching (SSH) is optional. Inspect the PC pins Sunshine's configured
+Verified matching (SSH) is optional. Inspect host pins Sunshine's configured
 output. Refit in this mode requires recent evidence of the selected output and
 requested host resolution. Missing displays and mismatched captures report an
 error. Managing Virtual Display Driver sizes is a separate unchecked option. It adds
@@ -190,6 +190,13 @@ requires a successful driver reload. Display restoration does not remove these
 added configuration entries.
 Other platforms default to Use existing host display. Mac display management
 and Windows console recovery retain their existing SSH requirements.
+Add and Edit share the same SSH connection section and Inspect host action.
+macOS uses a user at the configured computer address; Windows uses an SSH alias.
+Both Mac adapters can inspect displays, including the current main display and
+its modes. BetterDisplay mode selection and the Windows console helper remain
+platform-specific. The manual Refit checkbox appears only for verified matching;
+Sunshine matching provides Refit directly, and other adapters scale the video
+without changing the host resolution when the window resizes.
 
 Continue validates the name, address, and resolution and shows the rule under
 each field that needs attention. The check runs automatically when the last
@@ -255,3 +262,21 @@ For isolated visual checks, pass `--theme-file /path/to/colors.toml`; the light
 fixture is `ui/tests/light.toml`. The reader accepts flat quoted `#RRGGBB` color
 assignments and the `mode` key and ignores other metadata. It never executes
 theme code.
+
+### Fullscreen and full monitor resolution
+
+Add/Edit offers **Open in true fullscreen** and **Use full monitor resolution**
+for every platform. Enable both to avoid shrinking a full-resolution stream into
+a window reduced by desktop bars and borders. The resolution choice requests the
+physical pixel size of the focused local monitor at launch (Hyprland required);
+the host capture display must also match for pixel-for-pixel output. These options
+do not guarantee host refresh rate, encoder throughput, or host mode support.
+The fixed-resolution list also includes 6144×2560. Existing profiles default to
+windowed mode and keep their saved resolution policy. Save, disconnect, and connect
+to use changed settings; Reconnect retains the current session’s saved snapshot.
+
+Configuration fields: `display_mode: "windowed" | "fullscreen"` and
+`stream_resolution: "monitor" | "auto" | "WIDTHxHEIGHT"`. Full monitor mode resolves
+a fresh size at launch and does not use manual Refit memory. Startup applies the
+saved fullscreen choice once; subsequent manual toggles and daemon adoption retain
+the user’s current window state.

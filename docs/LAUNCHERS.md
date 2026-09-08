@@ -102,7 +102,7 @@ and left alone. The rule applies to every Moonlight window, not only managed one
 
 There is no ongoing fullscreen or placement correction. User fullscreen choices
 survive repeated opens, workspace changes, and daemon restart. Reconnect creates
-a new stream window with fresh windowed startup. A profile whose resolution is `auto` opens at the last known size and does not
+a new stream window with the saved windowed/fullscreen startup choice. A profile whose resolution is `auto` opens at the last known size and does not
 restart on its own; Refit restarts it once to match the current window. Existing windows adopted from
 the older backend are preserved; reconnect once to get their new startup tag.
 
