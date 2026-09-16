@@ -20,6 +20,12 @@ not as a claim that a language change reduces streaming latency. Video frames,
 audio, decoding, and input never pass through our daemon, helper, or manager UI.
 Moonlight retains hardware decoding and its own rendering/frame pacing.
 
+The `host_only` audio policy enables Moonlight's `--audio-on-host` and sets
+`ML_AUDIO=sdl` and `SDL_AUDIODRIVER=dummy` only on that client process. SDL
+discards local audio without changing the system mixer or other sessions.
+The supervisor uses the immutable session settings, including on reconnect;
+other audio policies retain the inherited audio environment.
+
 ## Ownership and concurrency
 
 - One daemon owns the user state directory under an exclusive writer lock.

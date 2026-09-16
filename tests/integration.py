@@ -165,6 +165,41 @@ class BackendTests(unittest.TestCase):
         self.wait(lambda: launches.exists() and str(pid) in [line.split()[0] for line in launches.read_text().splitlines()])
         return pid
 
+    def test_host_only_audio_is_scoped_to_client_and_session_snapshot(self):
+        self.stop_daemon()
+        self.env.update(ML_AUDIO="sdl", SDL_AUDIODRIVER="inherited-test-driver")
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        value["computers"]["laptop"]["profiles"]["desktop"]["audio"] = "host_only"
+        config.write_text(json.dumps(value))
+        self.start()
+
+        def audio_env(pid):
+            env = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+            return {part for part in env if part.startswith((b"ML_AUDIO=", b"SDL_AUDIODRIVER="))}
+
+        silent = {b"ML_AUDIO=sdl", b"SDL_AUDIODRIVER=dummy"}
+        inherited = {b"ML_AUDIO=sdl", b"SDL_AUDIODRIVER=inherited-test-driver"}
+        first = self.connect()
+        self.assertEqual(audio_env(first), silent)
+        other = self.connect("other")
+        self.assertEqual(audio_env(other), inherited)
+        self.assertEqual(audio_env(self.daemon.pid), inherited)
+
+        # Saved edits apply only after disconnect/connect, including after a
+        # daemon restart adopts and reconnects the existing session.
+        value["computers"]["laptop"]["profiles"]["desktop"]["audio"] = "continuous"
+        config.write_text(json.dumps(value))
+        self.stop_daemon()
+        self.start()
+        self.cli("reconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["pid"] not in (None, first))
+        self.assertEqual(audio_env(self.cli("status", "laptop")["pid"]), silent)
+        self.cli("disconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "idle")
+        self.assertEqual(audio_env(self.connect()), inherited)
+        self.assertEqual(audio_env(other), inherited)
+
     def test_remove_refuses_helper_and_launch_locks_online_and_offline(self):
         self.connect()
         self.cli("disconnect", "laptop")
@@ -933,7 +968,8 @@ class SettingsTests(unittest.TestCase):
 
     def test_audio_settings_round_trip_to_stream_arguments(self):
         self.cli("save", draft=self.draft())
-        for audio, focus, host in [("continuous", False, False), ("host", False, True), ("focus", True, False)]:
+        for audio, focus, host in [("continuous", False, False), ("host", False, True),
+                                   ("host_only", False, True), ("focus", True, False)]:
             with self.subTest(audio=audio):
                 draft = self.cli("get", "home")
                 draft["audio"] = audio
