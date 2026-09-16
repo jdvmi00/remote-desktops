@@ -213,8 +213,9 @@ New Windows profiles request display matching through Sunshine; other platforms
 use the host's existing display. All new profiles use automatic decoder selection.
 Advanced controls expose resolution, frame rate, bitrate in Mbit/s, codec,
 mouse mode (direct or relative pointer), and audio (play here and mute when
-unfocused, always play here, or play here and on the host), each with a one-line
-explanation. Host playback does not mute local playback. Audio changes apply
+unfocused, always play here, play here and on the host, or only play on the host),
+each with a one-line explanation. Only play on the host silences local playback;
+play here and on the host keeps both outputs enabled. Audio changes apply
 after Disconnect followed by Connect; Reconnect retains the current session
 settings. The resolution field is a combo box: pick a size from the list or
 type any WIDTHxHEIGHT, since Moonlight streams at whatever size is requested

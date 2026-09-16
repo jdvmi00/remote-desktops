@@ -66,7 +66,7 @@ Sheet {
         {label: "Remote desktop while focused", value: "always"},
         {label: "Remote desktop only in fullscreen", value: "fullscreen"},
         {label: "Keep system shortcuts on this computer", value: "never"}]
-    readonly property var audios: [{label: "Play here, mute when unfocused", value: "focus", hint: "Sound plays on this computer and mutes while the desktop window is not active."}, {label: "Always play here", value: "continuous", hint: "Sound plays on this computer even while the window is in the background."}, {label: "Play here and on the host", value: "host", hint: "Sound plays here even in the background, and host playback stays enabled."}]
+    readonly property var audios: [{label: "Play here, mute when unfocused", value: "focus", hint: "Sound plays on this computer and mutes while the desktop window is not active."}, {label: "Always play here", value: "continuous", hint: "Sound plays on this computer even while the window is in the background."}, {label: "Play here and on the host", value: "host", hint: "Sound plays here even in the background, and host playback stays enabled."}, {label: "Only play on the host", value: "host_only", hint: "Sound plays only on the host computer. This computer stays silent, even while the desktop window is active."}]
     readonly property var adapters: platform === "macos"
         ? [{label: "Use existing host display", value: "external", hint: "Streams the existing desktop. Resizing the window scales the picture; this app does not change the host display."},
            {label: "Follow the main display", value: "macos", hint: "Keeps Sunshine capturing the Mac's main display through lid and monitor changes, over SSH. The display mode is never changed."},
@@ -711,7 +711,7 @@ Sheet {
                     }
                     ColumnLayout {
                         Layout.fillWidth: true; spacing: 6
-                        Choice { id: audioChoice; Layout.fillWidth: true; model: setup.audios; textRole: "label"; valueRole: "value"; currentIndex: Math.max(0, setup.audios.map(c => c.value).indexOf(setup.draft.audio || "focus")); Accessible.name: "Audio"; onActivated: setup.set("audio", currentValue) }
+                        Choice { id: audioChoice; objectName: "setupAudio"; Layout.fillWidth: true; model: setup.audios; textRole: "label"; valueRole: "value"; currentIndex: Math.max(0, setup.audios.map(c => c.value).indexOf(setup.draft.audio || "focus")); Accessible.name: "Audio"; onActivated: setup.set("audio", currentValue) }
                         Hint { text: setup.audios[audioChoice.currentIndex].hint }
                     }
                     FieldLabel { visible: setup.managed && setup.platform === "macos"; text: "SSH control socket (optional)" }

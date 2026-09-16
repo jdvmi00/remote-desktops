@@ -613,6 +613,17 @@ fi
         QVariantMap host{{"name", "Studio"}, {"host", "studio.example.net"}, {"pairing_uuid", "11111111-2222-3333-4444-555555555555"}};
         QVERIFY(QMetaObject::invokeMethod(dialog, "choose", Q_ARG(QVariant, QVariant(host)), Q_ARG(QVariant, QVariant("macos"))));
         dialog->setProperty("advanced", true);
+        auto *audio = dialog->findChild<QObject *>("setupAudio");
+        QVERIFY(audio);
+        audio->setProperty("currentIndex", 3);
+        QVERIFY(QMetaObject::invokeMethod(audio, "activated", Q_ARG(int, 3)));
+        QCOMPARE(dialog->property("draft").toMap()["audio"].toString(), QString("host_only"));
+        QCOMPARE(audio->property("currentText").toString(), QString("Only play on the host"));
+        // Loading a saved policy restores its selection as well.
+        QVERIFY(QMetaObject::invokeMethod(dialog, "set", Q_ARG(QVariant, QVariant("audio")), Q_ARG(QVariant, QVariant("host"))));
+        QCOMPARE(audio->property("currentIndex").toInt(), 2);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "set", Q_ARG(QVariant, QVariant("audio")), Q_ARG(QVariant, QVariant("host_only"))));
+        QCOMPARE(audio->property("currentIndex").toInt(), 3);
         auto *field = dialog->findChild<QQuickItem *>("setupResolution");
         QVERIFY(field);
         QVERIFY(field->property("editable").toBool());

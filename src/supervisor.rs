@@ -150,6 +150,14 @@ pub fn run(directory: &Path, token: &str, runtime: &Path) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(writer.try_clone()?)
         .stderr(writer);
+    if record.settings["audio"].as_str() == Some("host_only") {
+        // Moonlight has no local-mute CLI flag. Discard this client's audio
+        // through SDL while --audio-on-host keeps the host speakers enabled.
+        // Use the session snapshot so reconnects retain the same policy.
+        command
+            .env("ML_AUDIO", "sdl")
+            .env("SDL_AUDIODRIVER", "dummy");
+    }
     let child = command.spawn();
     let child = match child {
         Ok(c) => c,

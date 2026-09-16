@@ -71,7 +71,7 @@ def configuration_value(value):
             require(type(p.get("bitrate", 60000)) is int and 1000 <= p.get("bitrate", 60000) <= 200000, "invalid bitrate")
             require(p.get("codec", "HEVC") in ("HEVC", "H.264", "AV1", "auto"), "invalid codec")
             require(p.get("display_mode", "windowed") in ("windowed", "fullscreen"), "invalid display mode")
-            require(p.get("audio", "focus") in ("focus", "continuous", "host"), "invalid audio policy")
+            require(p.get("audio", "focus") in ("focus", "continuous", "host", "host_only"), "invalid audio policy")
             require(p.get("input", "absolute") in ("absolute", "relative"), "invalid input policy")
             require(p.get("system_keys", "never") in ("never", "fullscreen", "always"), "invalid system key capture policy")
             require(p.get("keep_awake", "visible") in ("visible", "always", "never"), "invalid keep_awake policy")
@@ -352,6 +352,6 @@ def stream_argv(computer, p, fitted=None):
             "--video-codec", p.get("codec", "HEVC"), "--video-decoder", p.get("decoder", "hardware"),
             "--keep-awake" if p.get("keep_awake") == "always" else "--no-keep-awake",
             "--mute-on-focus-loss" if p.get("audio", "focus") == "focus" else "--no-mute-on-focus-loss",
-            "--audio-on-host" if p.get("audio") == "host" else "--no-audio-on-host",
+            "--audio-on-host" if p.get("audio") in ("host", "host_only") else "--no-audio-on-host",
             "--hdr" if p.get("hdr") else "--no-hdr", "--yuv444" if p.get("yuv444") else "--no-yuv444",
             computer["pairing_uuid"], "Desktop"]
