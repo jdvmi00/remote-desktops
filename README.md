@@ -27,6 +27,8 @@ recovery, and user controls.
 - Provide connection status, reconnect, disconnect, and display restoration.
 - Preserve Moonlight pairing and existing host authentication.
 - Offer a standalone computer/settings window with discovery and guided setup.
+- Configure an Omarchy Linux host's [keep-awake policy](docs/HOST_POWER.md)
+  for active Sunshine streams, with Off, AC-only, and Always options.
 
 Installable packaging and an optional Omarchy bar plugin remain planned.
 
@@ -62,6 +64,42 @@ See [desktop launchers and window matching](docs/LAUNCHERS.md) for application
 menu entries, existing-window reuse, and the matching contract for future Scenes.
 The first connection starts the daemon if needed. Commands acknowledge intent;
 use `status` to observe connection or restoration progress.
+
+### Rebuilding during development
+
+Build both the Rust backend and Qt manager with:
+
+```sh
+python3 scripts/dev.py build
+```
+
+Before rebuilding, disconnect all streams and wait for any pending display
+restoration to finish. Close the manager, then stop the development daemon.
+Closing the manager or stopping the daemon alone does not disconnect streams.
+After rebuilding, start these in separate terminals from the checkout:
+
+```sh
+python3 scripts/dev.py daemon
+python3 scripts/dev.py ui
+```
+
+The manager checks that it is using this checkout's current backend build.
+See [the development loop](docs/UI.md#local-development-loop) for details.
+
+On the development workstation with the local `remote-desktops-dev` helper,
+open **Remote Desktops (Development)** from the application launcher, or run
+`remote-desktops-dev`. After disconnecting streams and completing recovery,
+the rebuild sequence for its temporary user services is:
+
+```sh
+systemctl --user stop remote-desktops-development-ui remote-desktops-development-daemon
+remote-desktops-dev build
+remote-desktops-dev
+```
+
+The helper and desktop entry are local setup, not files installed by a checkout
+or a published package. They run the repository build; the last command starts
+the development daemon if needed and opens the manager.
 
 Run the checks locally:
 

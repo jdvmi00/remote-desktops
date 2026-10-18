@@ -355,7 +355,7 @@ void Manager::demoState(QString phase) {
 }
 
 void Manager::setup(QString action, QVariantMap draft) {
-    static const QSet<QString> actions{"catalog", "get", "test", "save", "discover", "pair", "inspect", "install-helper"};
+    static const QSet<QString> actions{"catalog", "get", "test", "save", "discover", "pair", "inspect", "install-helper", "power-status", "power-set"};
     if (m_setupBusy || !actions.contains(action)) return;
     m_setupBusy = true; publish();
     auto complete = [this, action, draft](bool ok, QByteArray data) {
@@ -416,6 +416,15 @@ void Manager::setup(QString action, QVariantMap draft) {
                         {"displays", QJsonArray{QJsonObject{{"uuid", "AAAAAAAA-1111-2222-3333-444444444444"}, {"name", "Studio Display"}, {"main", true}, {"builtin", false}, {"current", modes[0]}, {"modes", modes}},
                                                QJsonObject{{"uuid", "BBBBBBBB-1111-2222-3333-444444444444"}, {"name", "Built-in Retina Display"}, {"main", false}, {"builtin", true}, {"current", QJsonObject{{"resolution", "1728x1117"}, {"hidpi", true}, {"refresh", 120}}}, {"modes", QJsonArray{QJsonObject{{"resolution", "1728x1117"}, {"hidpi", true}, {"refresh", 120}}}}}}}};
                 }
+            } else if (action == "power-status" || action == "power-set") {
+                const auto id = draft["computer"].toString();
+                if (action == "power-set") {
+                    m_demoPower[id] = draft["policy"].toString();
+                    m_demoPowerAliases[id] = draft["ssh"].toMap()["alias"].toString();
+                }
+                result = QJsonObject{{"installed", m_demoPower.contains(id)}, {"policy", m_demoPower.value(id, "off")},
+                    {"supported", true}, {"sunshine_version", "2026.914.233613"}, {"stream_workers", 0},
+                    {"active", false}, {"running", m_demoPower.value(id, "off") != "off"}, {"on_ac", true}, {"error", ""}};
             } else if (action == "install-helper") {
                 m_demoHelpers.insert(draft["computer"].toString());
                 result = QJsonObject{{"ok", true}};
@@ -428,6 +437,7 @@ void Manager::setup(QString action, QVariantMap draft) {
                     result["codec"] = "auto"; result["input"] = "absolute"; result["audio"] = "focus";
                     result["profiles"] = QJsonObject{{"desktop", QJsonObject{{"stream_resolution", "1920x1080"}, {"fps", 60}, {"bitrate", 30000}}}};
                 }
+                if (m_demoPowerAliases.contains(id)) result["ssh"] = QJsonObject{{"alias", m_demoPowerAliases[id]}};
             } else if (action == "test") {
                 result["tested"] = true;
                 const auto adapter = draft["display"].toMap()["adapter"].toString();
@@ -451,6 +461,6 @@ void Manager::setup(QString action, QVariantMap draft) {
     QStringList arguments{"--json", "settings", action};
     if (action == "get") arguments << draft["computer"].toString();
     // Pairing waits for a PIN typed on the host; installation and probes run over SSH.
-    const int deadline = action == "pair" || action == "install-helper" ? 150000 : action == "inspect" || action == "test" ? 100000 : 60000;
+    const int deadline = action == "pair" || action == "install-helper" || action == "power-set" || action == "power-status" ? 150000 : action == "inspect" || action == "test" ? 100000 : 60000;
     process(arguments, complete, QJsonDocument(QJsonObject::fromVariantMap(draft)).toJson(QJsonDocument::Compact), deadline);
 }

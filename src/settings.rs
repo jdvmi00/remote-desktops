@@ -33,6 +33,10 @@ pub enum Action {
     Inspect,
     /// Install the Windows display helper for a JSON draft on stdin.
     InstallHelper,
+    /// Inspect the Omarchy Linux host's independent streaming sleep policy over SSH.
+    PowerStatus,
+    /// Apply a host-wide streaming sleep policy and remember the approved SSH alias.
+    PowerSet,
 }
 fn read_stdin() -> Result<Value> {
     let mut input = String::new();
@@ -389,6 +393,45 @@ pub async fn run(paths: &Paths, action: &Action) -> Result<Value> {
             let draft = read_stdin()?;
             let computer = subject(&value, &draft)?;
             host::call(json!({"operation":"install-helper","computer":computer,"device_id":draft["device_id"]})).await
+        }
+        Action::PowerStatus | Action::PowerSet => {
+            let draft = read_stdin()?;
+            let id = draft["computer"].as_str().context("missing computer ID")?;
+            if value["computers"].get(id).is_none() {
+                bail!("Save this computer before configuring host power.");
+            }
+            let computer = subject(&value, &draft)?;
+            if matches!(action, Action::PowerStatus) {
+                return host::call(json!({"operation":"power-status","computer":computer})).await;
+            }
+            if !matches!(draft["policy"].as_str(), Some("off" | "ac" | "always")) {
+                bail!("invalid host power policy");
+            }
+            storage::private_dir(paths.config.parent().context("missing config directory")?)?;
+            let _lock = storage::lock(&paths.config.with_extension("lock"), true)
+                .context("Another settings save is in progress. Try again.")?;
+            let mut next = load(paths)?;
+            if draft["revision"].as_str() != Some(&revision(&next)) {
+                bail!("Settings changed elsewhere. Reopen Host power before applying.");
+            }
+            if paths.config.symlink_metadata()?.file_type().is_symlink() {
+                bail!("Configuration is a symbolic link. Edit its source file directly.");
+            }
+            // Only SSH transport is editable here. Pairing identity and host platform
+            // come from the saved computer, never from a dialog-supplied replacement.
+            let mut saved = next["computers"][id].clone();
+            let mut ssh = saved["ssh"].as_object().cloned().unwrap_or_default();
+            ssh.insert("alias".into(), draft["ssh"]["alias"].clone());
+            saved["ssh"] = json!(ssh);
+            let result = host::call(
+                json!({"operation":"power-set","computer":saved,"policy":draft["policy"]}),
+            )
+            .await?;
+            next["computers"][id]["ssh"] = json!(ssh);
+            storage::write(&paths.config, &next).context(
+                "Host policy applied, but the SSH alias could not be saved. Recheck Host power.",
+            )?;
+            Ok(result)
         }
         Action::Test | Action::Save => {
             let draft = read_stdin()?;

@@ -941,6 +941,42 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse((self.root / "state").exists())
         self.assertTrue(self.cli("catalog")["paired"][0]["configured"])
 
+    def test_host_power_uses_saved_identity_and_saves_only_ssh_after_success(self):
+        self.cli("save", draft=self.draft())
+        before = json.loads(self.config.read_text())
+        before["computers"]["home"]["ssh"] = {"user": "preserved"}
+        before["extra"] = "preserved"
+        self.config.write_text(json.dumps(before))
+        audit = self.root / "power-audit.json"
+        self.env["POWER_AUDIT"] = str(audit)
+        ssh = self.root / "bin/ssh"
+        ssh.write_text("#!/usr/bin/env python3\nimport ast,json,os,sys\n"
+                       "r=ast.literal_eval(sys.stdin.readline().split('=',1)[1]);sys.stdin.read()\n"
+                       "with open(os.environ['POWER_AUDIT'],'w') as f: json.dump({'identity':r['pairing_uuid'],'operation':r['operation']},f)\n"
+                       "print(json.dumps({'ok':True,'result':{'policy':r['policy'] or 'off','stream_workers':0,'supported':True}}))\n")
+        ssh.chmod(0o700)
+        draft = self.cli("get", "home")
+        # A forged draft cannot redirect host power to a new pairing or platform.
+        draft.update(policy="ac", pairing_uuid="22222222-3333-4444-5555-666666666666", platform="windows")
+        draft["ssh"] = {"alias": "fake-host"}
+        self.assertEqual(self.cli("power-set", draft=draft)["policy"], "ac")
+        self.assertEqual(json.loads(audit.read_text())["identity"], self.uuid)
+        after = json.loads(self.config.read_text())
+        before["computers"]["home"]["ssh"]["alias"] = "fake-host"
+        self.assertEqual(after, before)
+        audit.unlink()
+        self.assertIn("changed elsewhere", self.cli("power-set", draft=draft, ok=False))
+        self.assertFalse(audit.exists())
+        raw = self.config.read_bytes()
+        status_draft = {"computer": "home", "ssh": {"alias": "fake-host"}}
+        self.assertEqual(self.cli("power-status", draft=status_draft)["stream_workers"], 0)
+        self.assertEqual(self.config.read_bytes(), raw)
+        ssh.write_text("#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"ok\":false,\"error\":\"host-power-streams-active\"}'\n")
+        draft = self.cli("get", "home")
+        draft.update(policy="always", ssh={"alias": "other-host"})
+        self.assertIn("streams-active", self.cli("power-set", draft=draft, ok=False))
+        self.assertEqual(self.config.read_bytes(), raw)
+
     def test_fullscreen_settings_round_trip(self):
         draft = self.draft()
         draft.update(display_mode="fullscreen", stream_resolution="monitor")

@@ -150,6 +150,55 @@ private slots:
         QCOMPARE(m.computers().first().toMap()["phase"].toString(), QString("window-ready"));
         QCOMPARE(warnings.count(), 0);
     }
+    void hostPowerRequiresInspectionAndExplicitApply() {
+        Manager m("/must-not-run", "/must-not-connect", true);
+        Theme theme("/missing/palette");
+        QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.rootContext()->setContextProperty("manager", &m);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.load(QUrl("qrc:/qml/Main.qml"));
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        auto *dialog = window->findChild<QObject *>("hostPowerDialog");
+        QVERIFY(dialog);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "begin", Q_ARG(QVariant, QVariant("lab"))));
+        QTRY_VERIFY(!m.setupBusy());
+        auto *apply = dialog->findChild<QObject *>("hostPowerApply");
+        QVERIFY(apply); QVERIFY(!apply->property("enabled").toBool());
+        dialog->setProperty("sshAlias", "lab");
+        QVERIFY(QMetaObject::invokeMethod(dialog, "inspect"));
+        QTRY_VERIFY(dialog->property("inspected").toBool());
+        QCOMPARE(dialog->property("policy").toString(), QString("ac"));
+        QVERIFY(apply->property("enabled").toBool());
+        QVERIFY(!dialog->property("hostStatus").toMap()["installed"].toBool());
+        auto *applied = dialog->findChild<QObject *>("hostPowerApplied");
+        auto *pending = dialog->findChild<QObject *>("hostPowerPending");
+        QVERIFY(applied); QVERIFY(pending);
+        QVERIFY(applied->property("text").toString().contains("Not installed"));
+        QCOMPARE(pending->property("text").toString(), QString("Not applied: On AC power."));
+        QCOMPARE(apply->property("text").toString(), QString("Install and apply on host"));
+        QVERIFY(QMetaObject::invokeMethod(apply, "clicked"));
+        QTRY_VERIFY(!m.setupBusy());
+        QTRY_VERIFY(dialog->property("hostStatus").toMap()["installed"].toBool());
+        QTRY_COMPARE(dialog->property("sshAlias").toString(), QString("lab"));
+        QCOMPARE(dialog->property("hostStatus").toMap()["policy"].toString(), QString("ac"));
+        QCOMPARE(applied->property("text").toString(), QString("On host: On AC power"));
+        QVERIFY(!dialog->property("pendingPolicy").toBool());
+        // Choosing Off and closing does not apply that choice to the host.
+        dialog->setProperty("policy", "off");
+        dialog->setProperty("selectionEdited", true);
+        QCOMPARE(pending->property("text").toString(), QString("Not applied: Off."));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "inspect"));
+        QTRY_VERIFY(dialog->property("inspected").toBool());
+        QCOMPARE(dialog->property("policy").toString(), QString("off"));
+        QCOMPARE(applied->property("text").toString(), QString("On host: On AC power"));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "begin", Q_ARG(QVariant, QVariant("lab"))));
+        QTRY_VERIFY(dialog->property("inspected").toBool());
+        QCOMPARE(dialog->property("hostStatus").toMap()["policy"].toString(), QString("ac"));
+        QCOMPARE(warnings.count(), 0);
+        window->close();
+    }
     void setupReadFailuresAndInitialCatalogErrorStayVisible() {
         QTemporaryDir temp;
         const QString binary = temp.path() + "/backend";
