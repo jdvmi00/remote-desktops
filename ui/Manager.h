@@ -73,6 +73,8 @@ private:
     QJsonArray m_catalog, m_sessions;
     QSet<QString> m_busy;
     QMap<QString, QVariantMap> m_demoDrafts;
+    QMap<QString, QString> m_demoPower;
+    QMap<QString, QString> m_demoPowerAliases;
     QSet<QString> m_demoPaired, m_demoHelpers, m_demoLaunchers;
     QTimer m_poll;
     QLocalSocket *m_socket = nullptr;

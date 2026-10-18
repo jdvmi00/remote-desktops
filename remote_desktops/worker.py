@@ -11,7 +11,7 @@ import sys
 from .host import Host, configuration, configuration_value, moonlight_hosts, UUID, prepare, restore, require, stream_argv
 from .mac_display import same_setting, manages_mode
 from .storage import atomic_json, read_json
-from . import setup
+from . import setup, host_power
 
 
 def health(record, host):
@@ -45,6 +45,9 @@ def health(record, host):
 
 
 def operation(request):
+    if request["operation"] in ("power-status", "power-set"):
+        return host_power.remote(request["computer"], "status" if request["operation"] == "power-status" else "configure",
+                                 request.get("policy"))
     if request["operation"] == "validate":
         return configuration(Path(request["config"]))
     if request["operation"] == "validate-value":

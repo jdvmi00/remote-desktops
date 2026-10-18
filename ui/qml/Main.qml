@@ -124,13 +124,14 @@ ApplicationWindow {
         // Demo-only: open a secondary surface for screenshots and smoke tests.
         if (name === "help") help.open()
         else if (name === "keyboard") keyboardSettings.begin()
+        else if (name === "host-power") hostPower.begin("lab")
         else if (name === "preferences") preferences.open()
         else if (name === "details") details.open()
         else if (name === "remove") removeSelected()
         else if (name === "notice") manager.notify("Studio Mac was added to your app launcher.")
         else if (name === "error") manager.notify("Disconnect this computer before removing it.", true)
     }
-    readonly property bool dialogOpen: setup.opened || keyboardSettings.opened || help.opened || preferences.opened || details.opened || confirm.opened
+    readonly property bool dialogOpen: setup.opened || keyboardSettings.opened || hostPower.opened || help.opened || preferences.opened || details.opened || confirm.opened
     Timer { interval: 1000; repeat: true; running: root.connected || (!!root.selected && root.selected.next_retry > root.nowSeconds); onTriggered: root.nowSeconds = Date.now() / 1000 }
     Shortcut { sequence: "Ctrl+R"; onActivated: manager.refresh() }
     Shortcut { sequence: "Ctrl+N"; enabled: !root.dialogOpen && !manager.setupBusy; onActivated: setup.begin("") }
@@ -440,6 +441,7 @@ ApplicationWindow {
                                 visible: !!root.selected
                                 Layout.fillWidth: true; Layout.topMargin: 8; spacing: 2
                                 ActionButton { quiet: true; icon.source: "qrc:/qml/icons/pencil.svg"; text: "Edit"; visible: !!root.selected && !root.selected.unconfigured; enabled: !manager.setupBusy; hint: "Change the name, address, or stream quality"; onClicked: setup.begin(root.selected.computer) }
+                                ActionButton { objectName: "hostPowerAction"; quiet: true; text: "Host power…"; visible: !!root.selected && root.selected.platform === "linux" && !root.selected.unconfigured; enabled: !manager.setupBusy; onClicked: hostPower.begin(root.selected.computer) }
                                 ActionButton { objectName: "launcherAction"; quiet: true; icon.source: "qrc:/qml/icons/grid.svg"; text: root.selected && root.selected.launcher_installed ? "Remove from app launcher" : "Add to app launcher"; visible: !!root.selected && !root.selected.unconfigured; enabled: !!root.selected && !root.selected.busy; hint: root.selected && root.selected.launcher_installed ? "Delete the desktop entry for this computer" : "Install a desktop entry that opens this computer directly"; onClicked: manager.act(root.selected.computer, root.selected.launcher_installed ? "launcher-remove" : "launcher") }
                                 ActionButton { quiet: true; icon.source: "qrc:/qml/icons/info.svg"; text: "Details"; hint: "Identity, state, and technical messages"; onClicked: details.open() }
                                 ActionButton { quiet: true; destructive: true; icon.source: "qrc:/qml/icons/trash.svg"; text: "Remove"; enabled: !!root.selected && !root.selected.busy && !root.selected.desired && !root.transitioning && !root.recovering; hint: "Remove this computer from Remote Desktops"; onClicked: root.removeSelected() }
@@ -458,6 +460,7 @@ ApplicationWindow {
         }
     }
     KeyboardDialog { id: keyboardSettings }
+    HostPowerDialog { id: hostPower }
     SetupDialog { id: setup; onKeyboardRequested: keyboardSettings.begin(); onSaved: computer => { root.selectedId = computer; manager.refresh() } }
     Confirm { id: confirm }
     Sheet {

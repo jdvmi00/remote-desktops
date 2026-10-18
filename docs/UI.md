@@ -44,7 +44,8 @@ the same intermediate phases a real session reports. The example computers are
 synthetic. `--state` supports `idle`, `connecting`, `preflight`, `running`,
 `attention`, `restore-pending`, `empty`, `unavailable`, `many` (twelve
 computers), and `unconfigured` (a removed computer with a pending restore).
-`--dialog` opens `help`, `preferences`, `details`, `remove`, `notice`, or `error`.
+`--dialog` opens `help`, `preferences`, `keyboard`, `host-power`, `details`,
+`remove`, `notice`, or `error`.
 `--setup-preview` accepts `computer`, `pair`, `preferences`, `recovery`
 (macOS with BetterDisplay), `windows`, `matching` (verified Windows matching),
 `advanced`, and `check`. `--compact`
@@ -158,6 +159,15 @@ of a rendered frame.
   animation on state changes complement color cues.
 
 ## Guided setup
+
+Saved Linux computers also have a separate **Host power…** action. It checks
+the Omarchy host over an approved SSH alias and explicitly applies a host-wide
+Off, AC-power-only, or Always keep-awake policy. No host power change occurs
+merely by opening the dialog or saving ordinary stream settings. See
+[host power](HOST_POWER.md) for support, lifetime, and validation limits.
+The dialog keeps the installed policy visible above the form and labels a
+different selection **Not applied** beside the apply button. First-time setup
+uses **Install and apply on host**; checking the host preserves a pending choice.
 
 Choose **Add computer**. The first step lists computers already paired in
 Moonlight, and below them the computers found through Tailscale and on the

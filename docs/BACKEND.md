@@ -100,6 +100,13 @@ certificates stay where they are.
 
 ## Commands
 
+Linux host power is configured separately from stream profiles. After saving
+the computer, `settings power-status` and `settings power-set` accept a JSON
+request on stdin naming the computer and `ssh.alias`. Set additionally requires
+the current `revision` from `settings get` and a `policy` of `off`, `ac`, or
+`always`. It applies the host-wide policy and saves the SSH alias only after
+success. See [host power](HOST_POWER.md). These operations do not connect a stream.
+
 ```sh
 cargo build --locked --release
 ./target/release/remote-desktops computers

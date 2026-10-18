@@ -15,6 +15,11 @@ alongside extraction would create recovery risk without improving video latency.
 The helper starts only for configuration, host operations, or active-session
 health checks; there is no continuously running Python controller.
 
+The opt-in [Linux host power integration](HOST_POWER.md) is a separate exception
+on the remote host: an independent Python user service observes Sunshine stream
+workers and owns temporary systemd inhibitors. Local Rust, Qt, and SSH processes
+do not hold its lifetime. It has no display-recovery or streaming responsibility.
+
 Rust was selected for bounded process/socket handling and low resident overhead,
 not as a claim that a language change reduces streaming latency. Video frames,
 audio, decoding, and input never pass through our daemon, helper, or manager UI.
