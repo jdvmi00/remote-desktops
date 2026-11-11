@@ -275,8 +275,9 @@ fn lua_string(value: &str) -> String {
     )
 }
 fn lua_window_id(value: &str) -> Result<u64> {
-    // Hyprland's clients JSON uses hexadecimal text (e.g. "180000e1"),
-    // while hl.get_windows() exposes the same stable_id as a Lua number.
+    // Hyprland's clients JSON uses hexadecimal text (e.g. "180000e1").
+    // hl.get_windows() exposes stable_id as a Lua number in 0.56 and as that
+    // same hexadecimal text in 0.57; `identity_check` accepts both.
     u64::from_str_radix(value, 16).context("invalid Hyprland stable window ID")
 }
 pub async fn action(window: &Window, action: &str) -> Result<()> {
@@ -320,17 +321,24 @@ pub async fn initialize(window: &Window, computer: &str, fullscreen: Option<bool
     }
     Ok(())
 }
-async fn dispatch_checked(window: &Window, dispatch: &str) -> Result<()> {
-    // Revalidate all identity fields inside the compositor, atomically with
-    // the dispatch. Never act on a recycled address based on a cached snapshot.
-    let code = format!(
-        "for _,w in ipairs(hl.get_windows()) do if w.address=={} and w.pid=={} and w.stable_id=={} and w.class=={} and w.title=={} then local r=hl.dispatch({dispatch}); if type(r)=='table' and r.error then error(r.error) end; return true end end; error('remote window identity changed')",
+/// Lua that runs `dispatch` only on the window whose every identity field
+/// still matches. Comparing a 0.57 string stable_id with a number is always
+/// false in Lua, which made every live window look replaced and left the
+/// stream window unadopted; normalize it to a number first.
+fn identity_check(window: &Window, dispatch: &str) -> Result<String> {
+    Ok(format!(
+        "for _,w in ipairs(hl.get_windows()) do if w.address=={} and w.pid=={} and (type(w.stable_id)=='string' and tonumber(w.stable_id,16) or w.stable_id)=={} and w.class=={} and w.title=={} then local r=hl.dispatch({dispatch}); if type(r)=='table' and r.error then error(r.error) end; return true end end; error('remote window identity changed')",
         lua_string(&window.address),
         window.pid,
         lua_window_id(&window.stable_id)?,
         lua_string(&window.class),
         lua_string(&window.title)
-    );
+    ))
+}
+async fn dispatch_checked(window: &Window, dispatch: &str) -> Result<()> {
+    // Revalidate all identity fields inside the compositor, atomically with
+    // the dispatch. Never act on a recycled address based on a cached snapshot.
+    let code = identity_check(window, dispatch)?;
     let result = tokio::time::timeout(
         Duration::from_secs(3),
         command()
@@ -395,5 +403,63 @@ mod tests {
         assert_eq!(lua_window_id("123").unwrap(), 291);
         assert!(lua_window_id("not-an-id").is_err());
         assert!(lua_window_id("1; error('injected')").is_err());
+    }
+    /// Run the identity check against a fake `hl` whose single window has the
+    /// given Lua `stable_id` literal. Returns the interpreter's output.
+    fn run_identity_check(stable_id: &str) -> (bool, String) {
+        let window = Window {
+            address: "0x5633ed22be10".into(),
+            pid: 35612,
+            stable_id: "18000095".into(),
+            class: CLASS.into(),
+            title: "MacBook - Moonlight".into(),
+            ..Default::default()
+        };
+        let check = identity_check(&window, "{tag='+remote-desktops-macbook'}").unwrap();
+        let script = format!(
+            "hl={{get_windows=function() return {{{{address='0x5633ed22be10',pid=35612,stable_id={stable_id},class='{CLASS}',title='MacBook - Moonlight'}}}} end, dispatch=function(a) print('dispatched '..a.tag) end}}\n\
+             local ok,err=pcall(function() {check} end)\n\
+             if not ok then print(err) os.exit(1) end"
+        );
+        // CI installs lua5.4; Hyprland itself links a system Lua.
+        let output = ["lua5.4", "lua", "lua5.5"]
+            .iter()
+            .find_map(|lua| {
+                std::process::Command::new(lua)
+                    .args(["-e", &script])
+                    .output()
+                    .ok()
+            })
+            .expect("a Lua interpreter (lua5.4) is required to test compositor scripts");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    }
+    #[test]
+    fn identity_check_accepts_hyprland_0_57_string_stable_ids() {
+        // Hyprland 0.57.1 returns stable_id as hex text, the same as clients JSON.
+        let (ok, text) = run_identity_check("'18000095'");
+        assert!(ok, "{text}");
+        assert!(
+            text.contains("dispatched +remote-desktops-macbook"),
+            "{text}"
+        );
+    }
+    #[test]
+    fn identity_check_accepts_hyprland_0_56_numeric_stable_ids() {
+        let (ok, text) = run_identity_check("0x18000095");
+        assert!(ok, "{text}");
+        assert!(
+            text.contains("dispatched +remote-desktops-macbook"),
+            "{text}"
+        );
+    }
+    #[test]
+    fn identity_check_rejects_a_replaced_window() {
+        let (ok, text) = run_identity_check("'18000096'");
+        assert!(!ok);
+        assert!(text.contains("remote window identity changed"), "{text}");
+        assert!(!text.contains("dispatched"), "{text}");
     }
 }

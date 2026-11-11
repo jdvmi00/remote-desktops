@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import signal
 import shlex
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -572,12 +573,53 @@ class BackendTests(unittest.TestCase):
         self.assertIn("window.tag", text)
         self.assertNotIn("fullscreen_state", text)
 
+    def test_hyprland_0_57_string_stable_id_window_is_adopted(self):
+        # Hyprland 0.57's hl.get_windows() returns stable_id as hex text. The
+        # identity check compared it with a number, so every tag dispatch
+        # looked like a replaced surface and `open` stayed pending forever.
+        lua = next((name for name in ("lua5.4", "lua", "lua5.5") if shutil.which(name)), None)
+        if lua is None:
+            if os.environ.get("CI"):
+                self.fail("CI must install lua5.4 to run compositor scripts")
+            self.skipTest("no Lua interpreter")
+        _, connection, clients, calls = self.fake_desktop()
+        shim = self.root / "helpers/bin/hyprctl"
+        shim.write_text(shim.read_text().replace(
+            "else: print('ok')",
+            "elif 'eval' in sys.argv:\n"
+            " import subprocess\n"
+            " ws=json.loads((root/'clients.json').read_text())\n"
+            " q=lambda v: json.dumps(v)\n"
+            " rows=','.join('{address=%s,pid=%d,stable_id=%s,class=%s,title=%s}' % (q(w['address']),w['pid'],q(w['stableId']),q(w['class']),q(w['title'])) for w in ws)\n"
+            " any_='local function any() return setmetatable({},{__index=function() return any() end,__call=function(_,a) return a end}) end\\n'\n"
+            " pre=any_+'hl={get_windows=function() return {'+rows+'} end,dsp=any(),dispatch=function(a) return true end}\\n'\n"
+            f" r=subprocess.run([{lua!r},'-e',pre+'local ok,e=pcall(function() '+sys.argv[-1]+' end) if not ok then print(\\'error: \\'..tostring(e)) os.exit(1) end print(\\'ok\\')'],capture_output=True,text=True)\n"
+            " print(r.stdout+r.stderr); sys.exit(r.returncode)\n"
+            "else: print('ok')"))
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        value["computers"]["laptop"]["profiles"]["desktop"]["display_mode"] = "fullscreen"
+        config.write_text(json.dumps(value))
+        pid = self.connect()
+        window = {"address": "0x5633ed22be10", "pid": pid, "stableId": "18000095",
+                  "class": "com.moonlight_stream.Moonlight", "title": "laptop - Moonlight",
+                  "mapped": True, "hidden": False, "visible": True,
+                  "workspace": {"id": 1}, "size": [4608, 1920], "fullscreen": 2}
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x5633ed22be10\nfullscreen>>1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        status = self.cli("status", "laptop")
+        self.assertEqual(status["window"]["stable_id"], "18000095")
+        self.assertIsNone(status["error"])
+        self.assertEqual(status["pid"], pid)
+        self.assertIn("window.tag", calls.read_text())
+
     def test_replaced_stream_window_is_retagged_without_quitting(self):
         _, connection, clients, calls = self.fake_desktop()
         shim = self.root / "helpers/bin/hyprctl"
         shim.write_text(shim.read_text().replace(
             "else: print('ok')",
-            "elif sys.argv[-1].startswith('for _,w') and 'stable_id==291' in sys.argv[-1]:\n"
+            "elif sys.argv[-1].startswith('for _,w') and 'stable_id)==291' in sys.argv[-1]:\n"
             " print('remote window identity changed'); sys.exit(1)\n"
             "else: print('ok')"))
         pid = self.connect()
