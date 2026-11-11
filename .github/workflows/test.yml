@@ -21,25 +21,67 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # A PR checkout is the merge commit; depth 2 includes its base parent.
+          fetch-depth: 2
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14'
+      - name: Detect Qt manager and Lua changes
+        id: ui
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          # Pushes, manual runs, and anything unexpected run the full UI suite.
+          # PRs skip it only when the merge commit provably leaves these paths alone.
+          run=true
+          if [ "$EVENT" = pull_request ]; then
+            if git rev-parse --verify -q 'HEAD^2' >/dev/null; then
+              changed=$(git diff --name-only --no-renames 'HEAD^1' HEAD)
+              printf 'Changed files:\n%s\n' "$changed"
+              if ! grep -E '^(ui/|integrations/|tests/local_command\.lua$|\.github/workflows/test\.yml$)' <<<"$changed"; then
+                run=false
+              fi
+            else
+              echo "::warning::PR checkout is not a merge commit; running UI checks."
+            fi
+          fi
+          echo "Qt manager and Lua checks: run=$run"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
       - name: Repository validation
         run: python scripts/check.py
-      - name: Rust format, lint, and tests
+      - name: Rust toolchain
         run: |
           rustup show
+          cargo --version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Rust format, lint, and tests
+        run: |
           cargo fmt --check
           cargo clippy --all-targets --locked -- -D warnings
           cargo test --locked
-          cargo build --locked
+      - name: Debug binary for daemon integration
+        # tests/integration.py runs target/debug/remote-desktops; cargo test does not build it.
+        run: cargo build --locked
       - name: Qt manager dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake qt6-base-dev qt6-declarative-dev qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtquick-window qml6-module-qtqml-workerscript libqt6svg6 lua5.4
+        if: steps.ui.outputs.run == 'true'
+        run: sudo apt-get update && sudo apt-get install -y ccache cmake qt6-base-dev qt6-declarative-dev qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtquick-window qml6-module-qtqml-workerscript libqt6svg6 lua5.4
+      - name: Qt manager compiler cache
+        if: steps.ui.outputs.run == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-ui-${{ runner.os }}-${{ hashFiles('ui/**') }}
+          restore-keys: ccache-ui-${{ runner.os }}-
       - name: Qt manager build and isolated tests
+        if: steps.ui.outputs.run == 'true'
         run: |
-          cmake -S ui -B build/ui -DCMAKE_BUILD_TYPE=Release
-          cmake --build build/ui --parallel 2
-          ctest --test-dir build/ui --output-on-failure
+          export CCACHE_DIR="$HOME/.cache/ccache" CCACHE_MAXSIZE=500M
+          ccache --zero-stats
+          cmake -S ui -B build/ui -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build build/ui --parallel 4
+          ccache --show-stats
+          ctest --test-dir build/ui --output-on-failure --parallel 4
           lua5.4 tests/local_command.lua
       - name: Host recovery and repository tests
         run: python -m unittest discover -s tests -v
