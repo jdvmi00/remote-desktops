@@ -22,6 +22,9 @@ pub struct Window {
     pub monitor: i64,
     #[serde(default = "no_monitor")]
     pub workspace: i64,
+    /// Hyprland fullscreen mode: 0 none, 1 maximized, 2 fullscreen, 3 both.
+    #[serde(default)]
+    pub fullscreen: i64,
 }
 fn no_monitor() -> i64 {
     -1
@@ -77,6 +80,7 @@ async fn snapshot() -> Result<Vec<Window>> {
                 size: serde_json::from_value(w["size"].clone()).unwrap_or_default(),
                 monitor: w["monitor"].as_i64().unwrap_or(-1),
                 workspace: w["workspace"]["id"].as_i64().unwrap_or(-1),
+                fullscreen: w["fullscreen"].as_i64().unwrap_or(0),
             })
         })
         .collect())
@@ -288,15 +292,23 @@ pub async fn action(window: &Window, action: &str) -> Result<()> {
     };
     dispatch_checked(window, dispatch).await
 }
-pub async fn initialize(window: &Window, computer: &str, fullscreen: bool) -> Result<()> {
+pub fn identity_lost(error: &anyhow::Error) -> bool {
+    error.to_string().contains("window identity changed")
+}
+/// Tag the window and, when `fullscreen` is set, apply that mode once.
+/// `None` leaves the compositor's current fullscreen state alone.
+pub async fn initialize(window: &Window, computer: &str, fullscreen: Option<bool>) -> Result<()> {
     let tag = lua_string(&format!("+remote-desktops-{computer}"));
     dispatch_checked(
         window,
         &format!("hl.dsp.window.tag({{window='address:'..w.address,tag={tag}}})"),
     )
     .await?;
-    let mode = if fullscreen { 2 } else { 0 };
-    dispatch_checked(window, &format!("hl.dsp.window.fullscreen_state({{window='address:'..w.address,internal={mode},client={mode},action='set'}})")).await
+    if let Some(fullscreen) = fullscreen {
+        let mode = if fullscreen { 2 } else { 0 };
+        dispatch_checked(window, &format!("hl.dsp.window.fullscreen_state({{window='address:'..w.address,internal={mode},client={mode},action='set'}})")).await?;
+    }
+    Ok(())
 }
 async fn dispatch_checked(window: &Window, dispatch: &str) -> Result<()> {
     // Revalidate all identity fields inside the compositor, atomically with
@@ -311,16 +323,27 @@ async fn dispatch_checked(window: &Window, dispatch: &str) -> Result<()> {
     );
     let result = tokio::time::timeout(
         Duration::from_secs(3),
-        command().args(["eval", &code]).output(),
+        command()
+            .stderr(Stdio::piped())
+            .args(["eval", &code])
+            .output(),
     )
     .await
     .context("window action timed out")??;
-    if !result.status.success()
-        || String::from_utf8_lossy(&result.stdout)
-            .to_lowercase()
-            .contains("error")
-    {
-        bail!("window action failed: window may have closed");
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let text = format!("{stdout}{stderr}");
+    if text.to_lowercase().contains("window identity changed") {
+        bail!("window identity changed");
+    }
+    if !result.status.success() || text.to_lowercase().contains("error") {
+        let detail = text
+            .lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty())
+            .unwrap_or("compositor rejected the action");
+        let detail: String = detail.chars().take(240).collect();
+        bail!("compositor rejected the window action: {detail}");
     }
     Ok(())
 }

@@ -62,7 +62,8 @@ other audio policies retain the inherited audio environment.
 - Process signals use Linux pidfds and token verification. Window actions
   recheck address, PID, stable identity, class, and title inside Hyprland before
   dispatching. A recycled address is not sufficient ownership evidence.
-- A bounded parser retains only typed Moonlight 6.1 evidence. Raw client logs,
+- A bounded parser retains only typed Moonlight 6.1 and 6.2 evidence. Those
+  releases emit the same launch, quit, and termination lines. Raw client logs,
   URLs, credentials, and screen content are not persisted. Unknown client
   versions remain usable, with log-derived observations marked unsupported.
 
@@ -80,12 +81,18 @@ inhibition on the owned window. Explicit focus/reconnect/disconnect can focus
 or close an owned window, but reconciliation never moves it.
 
 Each new matched stream window receives a stable per-computer tag and one
-application of the saved window/fullscreen choice to counter startup rules. This is consumed
-durably before dispatch and is not replayed on repeated opens, workspace changes,
-or daemon restart. A crash between persistence and dispatch may leave the initial
-fullscreen state unchanged; this choice avoids unexpectedly undoing user intent
-after recovery. Existing windows from the earlier schema are adopted without
-changing fullscreen. See [launcher identity](LAUNCHERS.md).
+application of the saved window/fullscreen choice to counter startup rules.
+Moonlight 6.2, through SDL, recreates the Wayland surface while entering
+fullscreen, so the first match is not acted on until that same window stays
+mapped. A profile that asked Moonlight for fullscreen does not send a second
+fullscreen change once the compositor already reports fullscreen. A replaced
+surface is retried; a rejected compositor action is recorded and does not
+signal the client. The policy is consumed durably before dispatch and is not
+replayed on repeated opens, workspace changes, or daemon restart. A crash
+between persistence and dispatch may leave the initial fullscreen state
+unchanged; this choice avoids unexpectedly undoing user intent after recovery.
+Existing windows from the earlier schema are adopted without changing
+fullscreen. See [launcher identity](LAUNCHERS.md).
 
 The CLI also runs without a Hyprland observer. In that case it reports process
 state (`running`), with no window identity or focus control. `window-ready` is

@@ -7,9 +7,13 @@ module. The Rust toolchain is pinned in `rust-toolchain.toml`.
 
 Omarchy ships a Moonlight rule that requests fullscreen even with
 `--display-mode windowed`. Profiles default to windowed mode and can select
-`display_mode: "fullscreen"`. The backend applies that saved choice once on the
-first matched window of a new stream. Later user fullscreen choices are preserved.
-See [launchers](LAUNCHERS.md) for identity and startup details.
+`display_mode: "fullscreen"`. The backend applies that saved choice once,
+after the matched window has stayed mapped, and skips a second fullscreen
+change when Moonlight's own fullscreen is already active. Later user
+fullscreen choices are preserved. A rejected window action does not close
+Moonlight. See [launchers](LAUNCHERS.md) for identity and startup details.
+Real Moonlight 6.2 streaming on a Hyprland session is not what the fake-client
+tests establish.
 
 ## Configuration
 
@@ -23,6 +27,18 @@ Pair the host using Moonlight first. Read its UUID from Moonlight's own
 configuration and put that identity in `pairing_uuid`. Certificates stay with
 Moonlight. Set `title` to the final remote window title. Configure Sunshine to
 offer the `Desktop` app, with the required capture/input permissions.
+
+`settings save` replaces one computer inside the configuration read under
+`computers.lock`. It does not rewrite the file from an earlier snapshot, and
+it cannot drop another computer. `settings pair`, `launcher install`, and the
+daemon do not write this file. The manager writes it only by running
+`settings save` or `settings remove`. To record a re-pair, put the new
+`pairing_uuid` in the save draft. The identity must be paired in Moonlight,
+unused by another computer or saved session, and the computer must be
+disconnected, idle, and free of pending host recovery. The window title
+becomes that paired hostname plus ` - Moonlight`. `host` can be changed
+without changing the pairing. Sending the computer's current `pairing_uuid`
+leaves the identity and title alone.
 
 Use `--profile NAME` to select a profile. Otherwise `default_profile`, then a
 profile named `desktop`, then the first profile in sorted order is selected.

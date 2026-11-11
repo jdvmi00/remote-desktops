@@ -45,10 +45,15 @@ without invoking a shell. See the [desktop entry Exec specification](https://spe
 
 ## Matching contract for Scenes
 
-Moonlight Qt 6.1 hardcodes a common Wayland app ID and overwrites SDL WM-class
-environment variables. A distinct desktop filename does not change the stream
-window's class. See [Moonlight 6.1 source](https://github.com/moonlight-stream/moonlight-qt/blob/v6.1.0/app/main.cpp).
-No Moonlight fork or library injection is required here.
+Moonlight Qt 6.1 and 6.2 hardcode a common Wayland app ID and overwrite SDL
+WM-class environment variables. 6.2 drops the `.desktop` suffix from
+`setDesktopFileName`; Qt's app id remains `com.moonlight_stream.Moonlight`.
+A distinct desktop filename does not change the stream window's class. See
+[Moonlight 6.1 source](https://github.com/moonlight-stream/moonlight-qt/blob/v6.1.0/app/main.cpp)
+and [Moonlight 6.2 source](https://github.com/moonlight-stream/moonlight-qt/blob/v6.2.0/app/main.cpp).
+No Moonlight fork or library injection is required here. The typed log lines
+used for video size, quit, and connection termination are unchanged between
+these two releases.
 
 `launcher list` and session `status` expose this metadata:
 
@@ -81,10 +86,14 @@ a separate feature. Class-only matching is insufficient for simultaneous hosts.
 
 ## Initial window state
 
-Omarchy's default Moonlight rule requests fullscreen. On first matching a new
-stream window, Remote Desktops assigns its tag and clears internal/client
-fullscreen once. The compositor continues to choose placement and size. A brief
-startup fullscreen transition is possible before the matching event arrives.
+Omarchy's default Moonlight rule requests fullscreen. After a new stream
+window stays mapped, Remote Desktops assigns its tag and applies the saved
+fullscreen choice once. Moonlight 6.2 enters fullscreen by recreating the
+Wayland surface; acting on the first match races that recreation and the
+close is what makes Moonlight quit. If the window is already fullscreen, no
+second fullscreen change is sent. The compositor continues to choose placement
+and size. A brief startup fullscreen transition is possible before the
+matching event arrives. A failed window action leaves Moonlight running.
 
 `remote-desktops window-rule install` (Preferences in the manager) appends a
 marked block to `~/.config/hypr/hyprland.lua` with a rule that opens Moonlight

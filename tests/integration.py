@@ -35,7 +35,7 @@ else:
             tmp.write_text(json.dumps(record)); os.replace(tmp,path)
         action=request['operation']
         if action=='probe':
-            record['resolved']={'client_version':'6.1.0'}
+            record['resolved']={'client_version':os.environ.get('FAKE_CLIENT_VERSION','6.1.0')}
             result={'argv':['python3','-u',str(Path(__file__).with_name('client.py')),str(path.parent),request.get('stream_resolution') or record['settings'].get('stream_resolution') or ''],'resolved':record['resolved']}
         elif action=='prepare':
             record['journal']={'output':{'original':'1','applied':'2','phase':'intent'}}
@@ -522,6 +522,96 @@ class BackendTests(unittest.TestCase):
         self.addCleanup(replacement.close)
         self.assertEqual(self.cli("open", "laptop")["pid"], pid)
         self.assertEqual(calls.read_text().count("fullscreen_state"), 1)
+
+    def test_fullscreen_stream_is_not_restaged_when_already_fullscreen(self):
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        value["computers"]["laptop"]["profiles"]["desktop"]["display_mode"] = "fullscreen"
+        config.write_text(json.dumps(value))
+        _, connection, clients, calls = self.fake_desktop()
+        pid = self.connect()
+        window = {"address": "0x1", "pid": pid, "stableId": "123", "class": "com.moonlight_stream.Moonlight",
+                  "title": "laptop - Moonlight", "mapped": True, "hidden": False, "visible": True,
+                  "workspace": {"id": 1}, "size": [1920, 1080], "fullscreen": 2}
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        text = calls.read_text()
+        self.assertIn("window.tag", text)
+        self.assertNotIn("fullscreen_state", text)
+        self.assertEqual(self.cli("status", "laptop")["pid"], pid)
+        self.assertTrue(Path(f"/proc/{pid}").exists())
+
+    def test_replaced_stream_window_is_retagged_without_quitting(self):
+        _, connection, clients, calls = self.fake_desktop()
+        shim = self.root / "helpers/bin/hyprctl"
+        shim.write_text(shim.read_text().replace(
+            "else: print('ok')",
+            "elif sys.argv[-1].startswith('for _,w') and 'stable_id==291' in sys.argv[-1]:\n"
+            " print('remote window identity changed'); sys.exit(1)\n"
+            "else: print('ok')"))
+        pid = self.connect()
+        window = {"address": "0x1", "pid": pid, "stableId": "123", "class": "com.moonlight_stream.Moonlight",
+                  "title": "laptop - Moonlight", "mapped": True, "hidden": False, "visible": True,
+                  "workspace": {"id": 1}, "size": [1920, 1080], "fullscreen": 0}
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: "identity changed" in calls.read_text())
+        self.assertIsNone(self.cli("status", "laptop")["error"])
+        self.assertTrue(Path(f"/proc/{pid}").exists())
+        window.update(address="0x2", stableId="124")
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x2\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready", timeout=8)
+        status = self.cli("status", "laptop")
+        self.assertEqual(status["pid"], pid)
+        self.assertIsNone(status["error"])
+        self.assertTrue(Path(f"/proc/{pid}").exists())
+        self.assertIn("fullscreen_state", calls.read_text())
+
+    def test_failed_window_rule_leaves_moonlight_running(self):
+        _, connection, clients, calls = self.fake_desktop()
+        shim = self.root / "helpers/bin/hyprctl"
+        shim.write_text(shim.read_text().replace(
+            "else: print('ok')",
+            "elif 'fullscreen_state' in sys.argv[-1]:\n"
+            " print('dispatcher failed: unsupported'); sys.exit(1)\n"
+            "else: print('ok')"))
+        pid = self.connect()
+        window = {"address": "0x1", "pid": pid, "stableId": "123", "class": "com.moonlight_stream.Moonlight",
+                  "title": "laptop - Moonlight", "mapped": True, "hidden": False, "visible": True,
+                  "workspace": {"id": 1}, "size": [1920, 1080], "fullscreen": 0}
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: (self.cli("status", "laptop").get("error") or "").startswith("window rule was not applied"))
+        status = self.cli("status", "laptop")
+        self.assertIn("still running", status["error"])
+        self.assertNotIn("may have closed", status["error"])
+        self.assertEqual(status["phase"], "window-ready")
+        self.assertEqual(status["pid"], pid)
+        self.assertTrue(Path(f"/proc/{pid}").exists())
+        time.sleep(.6)
+        self.assertEqual(calls.read_text().count("fullscreen_state"), 1)
+
+    def test_moonlight_6_2_evidence_is_parsed_and_unknown_versions_are_not(self):
+        self.stop_daemon()
+        self.env["FAKE_CLIENT_VERSION"] = "6.2.0"
+        self.start()
+        self.connect()
+        self.wait(lambda: self.cli("status", "laptop")["evidence"].get("parser") == "moonlight-qt-6.2")
+        status = self.cli("status", "laptop")
+        self.assertEqual(status["client_version"], "6.2.0")
+        self.assertEqual(status["evidence"]["negotiated_video"]["fps"], 60)
+        self.cli("disconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "idle")
+        self.stop_daemon()
+        self.env["FAKE_CLIENT_VERSION"] = "5.0.0"
+        self.start()
+        self.connect()
+        self.wait(lambda: self.cli("status", "laptop")["evidence"].get("parser") == "unsupported-version")
+        evidence = self.cli("status", "laptop")["evidence"]
+        self.assertNotIn("negotiated_video", evidence)
+        self.assertNotIn("quit", evidence)
 
     def test_workspace_and_geometry_changes_never_place_or_restart_the_window(self):
         server, connection, clients, calls = self.fake_desktop()
@@ -1044,7 +1134,7 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn("hdr", draft["profiles"]["desktop"])
         draft.update(name="Renamed", stream_resolution="2560x1440", title="ignored", pairing_uuid="ignored-too")
         draft["ssh"] = {"user": "renamed-user", "control_path": "", "alias": ""}
-        self.assertIn("reopen it to edit", self.cli("save", draft=draft, ok=False))
+        self.assertIn("pairing identity", self.cli("save", draft=draft, ok=False))
         del draft["pairing_uuid"]
         self.cli("save", draft=draft)
         after = json.loads(self.config.read_text())
@@ -1054,6 +1144,64 @@ class SettingsTests(unittest.TestCase):
         expected["computers"]["home"]["profiles"]["desktop"]["stream_resolution"] = "2560x1440"
         self.assertEqual(after, expected)
         self.assertEqual(session.read_bytes(), snapshot)
+
+    def test_save_keeps_other_computers_and_updates_pairing_only_when_idle(self):
+        self.cli("save", draft=self.draft())
+        conf = self.root / "config/Moonlight Game Streaming Project/Moonlight.conf"
+        conf.write_text(conf.read_text()
+                        + "2\\uuid=22222222-3333-4444-5555-666666666666\n2\\hostname=Work PC\n"
+                        + "2\\srvcert=synthetic\n2\\localaddress=work.example.net\n"
+                        + "3\\uuid=33333333-3333-4444-5555-666666666666\n3\\hostname=Studio\n"
+                        + "3\\srvcert=synthetic\n3\\manualaddress=studio.example.net\n"
+                        + "4\\uuid=44444444-3333-4444-5555-666666666666\n4\\hostname=Other\n"
+                        + "4\\srvcert=synthetic\n4\\localaddress=other.example.net\n")
+        second = self.draft()
+        second.update(computer="work", pairing_uuid="22222222-3333-4444-5555-666666666666",
+                      name="Work", host="work.example.net", revision=self.cli("catalog")["revision"])
+        self.cli("save", draft=second)
+        home = self.cli("get", "home")
+        home.update(name="Home renamed", host="home-new.example.net")
+        self.cli("save", draft=home)
+        saved = json.loads(self.config.read_text())["computers"]
+        self.assertEqual(set(saved), {"home", "work"})
+        self.assertEqual(saved["work"]["host"], "work.example.net")
+        self.assertEqual(saved["work"]["pairing_uuid"], "22222222-3333-4444-5555-666666666666")
+        self.assertEqual(saved["home"]["name"], "Home renamed")
+        self.assertEqual(saved["home"]["host"], "home-new.example.net")
+        self.assertEqual(saved["home"]["pairing_uuid"], self.uuid)
+        home = self.cli("get", "home")
+        home.update(pairing_uuid="33333333-3333-4444-5555-666666666666", host="studio.example.net")
+        self.cli("save", draft=home)
+        saved = json.loads(self.config.read_text())["computers"]
+        self.assertEqual(saved["home"]["pairing_uuid"], "33333333-3333-4444-5555-666666666666")
+        self.assertEqual(saved["home"]["title"], "Studio - Moonlight")
+        self.assertEqual(saved["home"]["host"], "studio.example.net")
+        self.assertEqual(saved["work"]["title"], "Work PC - Moonlight")
+        home = self.cli("get", "home")
+        home.update(pairing_uuid="33333333-3333-4444-5555-666666666666", name="Studio desk")
+        self.cli("save", draft=home)
+        self.assertEqual(json.loads(self.config.read_text())["computers"]["home"]["name"], "Studio desk")
+        before = self.config.read_bytes()
+        home = self.cli("get", "home")
+        home["pairing_uuid"] = "22222222-3333-4444-5555-666666666666"
+        self.assertIn("same pairing", self.cli("save", draft=home, ok=False))
+        self.assertEqual(self.config.read_bytes(), before)
+        directory = self.root / "state/remote-desktops/sessions/home"
+        directory.mkdir(parents=True)
+        (directory / "session.json").write_text(json.dumps(
+            {"desired": True, "phase": "window-ready", "config": {"pairing_uuid": self.uuid}}))
+        home = self.cli("get", "home")
+        home["pairing_uuid"] = "44444444-3333-4444-5555-666666666666"
+        self.assertIn("pairing identity", self.cli("save", draft=home, ok=False))
+        self.assertEqual(self.config.read_bytes(), before)
+        # A host edit still applies while that session is open; the pairing stays put.
+        home = self.cli("get", "home")
+        home["host"] = "studio-2.example.net"
+        self.cli("save", draft=home)
+        saved = json.loads(self.config.read_text())["computers"]
+        self.assertEqual(saved["home"]["host"], "studio-2.example.net")
+        self.assertEqual(saved["home"]["pairing_uuid"], "33333333-3333-4444-5555-666666666666")
+        self.assertIn("work", saved)
 
     def test_stale_invalid_duplicate_and_failed_probe_do_not_write(self):
         draft = self.draft()
@@ -1127,6 +1275,7 @@ class SettingsTests(unittest.TestCase):
         paired = self.cli("pair", draft={"host": "garage.tail.ts.net", "pin": "1234"})["paired"]
         self.assertEqual(paired, {"paired": True, "pairing_uuid": "22222222-3333-4444-5555-666666666666", "name": "Garage PC", "host": "garage.tail.ts.net"})
         self.assertTrue(any(c["pairing_uuid"] == paired["pairing_uuid"] for c in self.cli("catalog")["paired"]))
+        self.assertEqual(list(json.loads(self.config.read_text())["computers"]), ["home"])
         self.assertFalse((self.root / "state").exists())
 
     def test_sunshine_without_ssh_survives_check_save_and_reopen(self):
