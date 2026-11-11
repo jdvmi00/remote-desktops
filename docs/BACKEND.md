@@ -104,6 +104,13 @@ window. For other adapters, `auto` needs Hyprland; elsewhere the connection fail
 with `fit-unavailable`. Status reports the size in use as `resolution` with
 `fit_window`.
 
+For a remote desktop that scales inside a window, use `display_mode: "windowed"`
+with a fixed `stream_resolution` equal to the host display's own resolution.
+Sunshine pads a stream whose shape differs from the captured display, which
+wastes pixels and adds bars. Moonlight then scales that picture to the window
+at any size. On an Omarchy floating workspace the window opens in the stream's
+shape; see [window behavior](ARCHITECTURE.md#window-behavior).
+
 Never store passwords, private keys, or pairing certificates in this file.
 
 The graphical manager can set up the managed adapters. For a Mac it needs the

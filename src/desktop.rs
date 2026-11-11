@@ -25,6 +25,10 @@ pub struct Window {
     /// Hyprland fullscreen mode: 0 none, 1 maximized, 2 fullscreen, 3 both.
     #[serde(default)]
     pub fullscreen: i64,
+    /// Floated by Omarchy's floating workspace mode at its generic size, not by
+    /// the user or a rule of their own.
+    #[serde(default)]
+    pub mode_floated: bool,
 }
 fn no_monitor() -> i64 {
     -1
@@ -91,6 +95,12 @@ async fn snapshot() -> Result<Vec<Window>> {
                 monitor: w["monitor"].as_i64().unwrap_or(-1),
                 workspace: w["workspace"]["id"].as_i64().unwrap_or(-1),
                 fullscreen: w["fullscreen"].as_i64().unwrap_or(0),
+                mode_floated: w["floating"] == true
+                    && w["tags"].as_array().is_some_and(|tags| {
+                        tags.iter()
+                            .filter_map(Value::as_str)
+                            .any(|tag| tag.starts_with("omarchy-mode-"))
+                    }),
             })
         })
         .collect())
@@ -127,11 +137,16 @@ pub async fn monitors() -> Result<Vec<Monitor>> {
         .context("invalid monitor list")?
         .iter()
         .filter_map(|m| {
+            // Report a rotated monitor the way windows see it.
+            let (mut width, mut height) = (m["width"].as_f64()?, m["height"].as_f64()?);
+            if m["transform"].as_i64().unwrap_or(0) % 2 != 0 {
+                std::mem::swap(&mut width, &mut height);
+            }
             Some(Monitor {
                 id: m["id"].as_i64()?,
                 name: m["name"].as_str()?.into(),
-                width: m["width"].as_f64()?,
-                height: m["height"].as_f64()?,
+                width,
+                height,
                 scale: m["scale"].as_f64().filter(|s| *s > 0.0)?,
                 focused: m["focused"] == true,
                 active_workspace: m["activeWorkspace"]["id"].as_i64().unwrap_or(-1),
@@ -175,6 +190,22 @@ pub fn physical(size: &[i64], scale: f64) -> Option<String> {
         return None;
     }
     Some(format!("{w}x{h}"))
+}
+/// Logical size for a floating stream window: the stream's own shape, so the
+/// picture fills it without bars, as large as fits in 70% of the monitor and
+/// never beyond one stream pixel per screen pixel.
+pub fn floating_size(stream: &str, monitor: &Monitor) -> Option<(i64, i64)> {
+    let (w, h) = stream.split_once('x')?;
+    let (w, h) = (w.parse::<f64>().ok()?, h.parse::<f64>().ok()?);
+    if w < 240.0 || h < 240.0 {
+        return None;
+    }
+    // Logical room on each axis, then one factor so the shape is kept.
+    let scale = monitor.scale;
+    let room = |pixels: f64, side: f64| (side * 0.7).min(pixels) / scale;
+    let factor = (room(w, monitor.width) / w).min(room(h, monitor.height) / h);
+    let size = ((w * factor).round() as i64, (h * factor).round() as i64);
+    (size.0 >= 120 && size.1 >= 120).then_some(size)
 }
 /// The size to launch a fit stream at: the exact size last fitted for this
 /// monitor and workspace, or the monitor's full size as a first guess that the
@@ -307,8 +338,14 @@ pub fn identity_lost(error: &anyhow::Error) -> bool {
     error.to_string().contains("window identity changed")
 }
 /// Tag the window and, when `fullscreen` is set, apply that mode once.
-/// `None` leaves the compositor's current fullscreen state alone.
-pub async fn initialize(window: &Window, computer: &str, fullscreen: Option<bool>) -> Result<()> {
+/// `None` leaves the compositor's current fullscreen state alone. `float_size`
+/// gives a floating window the stream's shape and keeps it while resizing.
+pub async fn initialize(
+    window: &Window,
+    computer: &str,
+    fullscreen: Option<bool>,
+    float_size: Option<(i64, i64)>,
+) -> Result<()> {
     let tag = lua_string(&format!("+remote-desktops-{computer}"));
     dispatch_checked(
         window,
@@ -318,6 +355,15 @@ pub async fn initialize(window: &Window, computer: &str, fullscreen: Option<bool
     if let Some(fullscreen) = fullscreen {
         let mode = if fullscreen { 2 } else { 0 };
         dispatch_checked(window, &format!("hl.dsp.window.fullscreen_state({{window='address:'..w.address,internal={mode},client={mode},action='set'}})")).await?;
+    }
+    if let Some((width, height)) = float_size {
+        dispatch_checked(window, &format!("hl.dsp.window.resize({{window='address:'..w.address,x={width},y={height},relative=false}})")).await?;
+        dispatch_checked(
+            window,
+            "hl.dsp.window.center({window='address:'..w.address})",
+        )
+        .await?;
+        dispatch_checked(window, "hl.dsp.window.set_prop({window='address:'..w.address,prop='keep_aspect_ratio',value='1'})").await?;
     }
     Ok(())
 }
@@ -368,6 +414,23 @@ async fn dispatch_checked(window: &Window, dispatch: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn floating_size_keeps_the_stream_shape_within_the_monitor() {
+        let monitor = Monitor {
+            width: 6144.0,
+            height: 2560.0,
+            scale: 4.0 / 3.0,
+            ..Default::default()
+        };
+        // Same shape as the monitor: 70% of its logical 4608x1920.
+        assert_eq!(floating_size("6144x2560", &monitor), Some((3226, 1344)));
+        // A small stream is shown one stream pixel per screen pixel, not enlarged.
+        assert_eq!(floating_size("1920x1280", &monitor), Some((1440, 960)));
+        // A tall stream is bounded by height and keeps 16:9.
+        assert_eq!(floating_size("3840x2160", &monitor), Some((2389, 1344)));
+        assert_eq!(floating_size("auto", &monitor), None);
+        assert_eq!(floating_size("monitor", &monitor), None);
+    }
     #[test]
     fn physical_size_rounds_to_even_and_applies_scale() {
         assert_eq!(physical(&[1201, 801], 1.0).as_deref(), Some("1200x800"));

@@ -763,6 +763,45 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(calls.read_text().count("fullscreen_state"), 2,
                          "only final owned windows receive startup policy")
 
+    def test_window_floated_by_the_workspace_mode_takes_the_stream_shape_once(self):
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        value["computers"]["laptop"]["profiles"]["desktop"]["stream_resolution"] = "3840x2160"
+        value["computers"]["other"]["profiles"]["desktop"]["stream_resolution"] = "3840x2160"
+        config.write_text(json.dumps(value))
+        server, connection, clients, calls = self.fake_desktop([
+            {"id": 0, "name": "test", "width": 6144, "height": 2560, "transform": 0,
+             "scale": 4 / 3, "focused": True, "activeWorkspace": {"id": 1}}])
+        pid = self.connect()
+        window = {"address": "0x1", "pid": pid, "stableId": "123", "class": "com.moonlight_stream.Moonlight",
+                  "title": "laptop - Moonlight", "mapped": True, "hidden": False, "visible": True, "monitor": 0,
+                  "workspace": {"id": 1}, "size": [1100, 760], "floating": True, "fullscreen": 0,
+                  "tags": ["omarchy-floating-workspace", "omarchy-mode-opened*"]}
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        commands = calls.read_text()
+        # 16:9 inside 70% of the logical 4608x1920 monitor, bounded by height.
+        self.assertEqual(commands.count("window.resize({window='address:'..w.address,x=2389,y=1344,relative=false})"), 1)
+        self.assertEqual(commands.count("window.center"), 1)
+        self.assertEqual(commands.count("keep_aspect_ratio"), 1)
+        self.assertIsNone(self.cli("status", "laptop")["error"])
+        # A later move or resize is the user's; the shape is not applied again.
+        window.update(size=[900, 700])
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"movewindow>>0x1,1\n")
+        self.wait(lambda: self.cli("status", "laptop")["window"]["size"] == [900, 700])
+        self.assertEqual(calls.read_text().count("window.resize"), 1)
+        # A window the user or their own rule floated keeps its size.
+        other_pid = self.connect("other")
+        own = {**window, "address": "0x2", "pid": other_pid, "stableId": "124", "title": "other - Moonlight",
+               "tags": ["my-own-rule*"]}
+        clients.write_text(json.dumps([window, own]))
+        connection.sendall(b"openwindow>>0x2\n")
+        self.wait(lambda: self.cli("status", "other")["phase"] == "window-ready")
+        self.assertEqual(calls.read_text().count("window.resize"), 1)
+        self.assertEqual(calls.read_text().count("keep_aspect_ratio"), 1)
+
     def test_connect_launches_at_the_last_known_size_and_never_restarts_to_fit(self):
         config = self.root / "config/remote-desktops/computers.json"
         value = json.loads(config.read_text())
