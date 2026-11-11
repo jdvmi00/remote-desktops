@@ -824,7 +824,22 @@ impl Manager {
                     // below. Writing the error first leaves phase at the
                     // pre-window "running" state across the inhibit round trip,
                     // so a status read can observe the failure too early.
-                    match desktop::initialize(w, name, fullscreen).await {
+                    // Omarchy's floating mode opens every window at one generic
+                    // size. Give this one the stream's shape instead, once.
+                    let float_size = if !wants_fullscreen && w.mode_floated {
+                        let stream = r
+                            .resolution
+                            .clone()
+                            .or_else(|| r.settings["stream_resolution"].as_str().map(String::from))
+                            .unwrap_or_default();
+                        desktop::monitors().await.ok().and_then(|monitors| {
+                            let monitor = monitors.iter().find(|m| m.id == w.monitor)?;
+                            desktop::floating_size(&stream, monitor)
+                        })
+                    } else {
+                        None
+                    };
+                    match desktop::initialize(w, name, fullscreen, float_size).await {
                         Err(error) if desktop::identity_lost(&error) => {
                             // The surface was replaced. Do not record a stream
                             // failure and do not signal the client; retry on
