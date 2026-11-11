@@ -780,6 +780,7 @@ impl Manager {
                         && Some(w.title.as_str()) == r.config["title"].as_str()
                 })
                 .cloned();
+            let mut rejected_rule = None;
             if let Some(w) = &window {
                 let key = format!("{}:{}:{}", job.token, w.pid, w.stable_id);
                 if r.initialized_window.as_ref() != Some(&key) {
@@ -806,6 +807,10 @@ impl Manager {
                     } else {
                         Some(wants_fullscreen)
                     };
+                    // A rejected rule is published with the window-ready phase
+                    // below. Writing the error first leaves phase at the
+                    // pre-window "running" state across the inhibit round trip,
+                    // so a status read can observe the failure too early.
                     match desktop::initialize(w, name, fullscreen).await {
                         Err(error) if desktop::identity_lost(&error) => {
                             // The surface was replaced. Do not record a stream
@@ -817,12 +822,9 @@ impl Manager {
                         }
                         Err(error) => {
                             self.startup.lock().unwrap().remove(name);
-                            self.update(name, |r| {
-                                r.error = Some(format!(
-                                    "window rule was not applied: {error}. The stream is still running."
-                                ))
-                            })
-                            .await?;
+                            rejected_rule = Some(format!(
+                                "window rule was not applied: {error}. The stream is still running."
+                            ));
                         }
                         Ok(()) => {
                             self.startup.lock().unwrap().remove(name);
@@ -851,10 +853,18 @@ impl Manager {
                 let _ = desktop::action(w, if inhibit { "inhibit" } else { "uninhibit" }).await;
             }
             // Observed geometry is never fed back into placement. It only sizes
-            // the stream, once, for profiles that fit the window.
-            if window != r.window || r.evidence != job.evidence || r.phase == "connecting" {
+            // the stream, once, for profiles that fit the window. A rejected
+            // startup rule is part of this same write so phase cannot lag it.
+            if rejected_rule.is_some()
+                || window != r.window
+                || r.evidence != job.evidence
+                || r.phase == "connecting"
+            {
                 r = self
                     .update(name, |r| {
+                        if let Some(message) = rejected_rule.clone() {
+                            r.error = Some(message);
+                        }
                         r.window = window;
                         r.evidence = job.evidence.clone();
                         r.phase = if r.window.is_some() {
