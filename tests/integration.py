@@ -542,6 +542,36 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(self.cli("status", "laptop")["pid"], pid)
         self.assertTrue(Path(f"/proc/{pid}").exists())
 
+    def test_sdl_fullscreen_window_is_tagged_when_its_title_arrives(self):
+        # Moonlight 6.2 on sdl2-compat advertises the executable name, opens a
+        # placeholder, then recreates a fullscreen surface with the hostname title.
+        _, connection, clients, calls = self.fake_desktop()
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        value["computers"]["laptop"]["profiles"]["desktop"]["display_mode"] = "fullscreen"
+        config.write_text(json.dumps(value))
+        pid = self.connect()
+        placeholder = {"address": "0x1", "pid": pid, "stableId": "123", "class": "moonlight",
+                       "title": "Moonlight", "mapped": True, "hidden": False, "visible": True,
+                       "workspace": {"id": 1}, "size": [800, 600], "fullscreen": 0}
+        clients.write_text(json.dumps([placeholder]))
+        connection.sendall(b"openwindow>>0x1\n")
+        time.sleep(0.3)
+        self.assertIsNone(self.cli("status", "laptop")["window"])
+        self.assertNotIn("window.tag", calls.read_text())
+        stream = {**placeholder, "address": "0x2", "stableId": "124", "title": "laptop - Moonlight",
+                  "fullscreen": 2, "size": [4608, 1920]}
+        clients.write_text(json.dumps([stream]))
+        connection.sendall(b"closewindow>>0x1\nopenwindow>>0x2\nwindowtitle>>0x2\nfullscreen>>0x2\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        status = self.cli("status", "laptop")
+        self.assertEqual(status["window"]["title"], "laptop - Moonlight")
+        self.assertEqual(status["window"]["class"], "moonlight")
+        self.assertEqual(status["pid"], pid)
+        text = calls.read_text()
+        self.assertIn("window.tag", text)
+        self.assertNotIn("fullscreen_state", text)
+
     def test_replaced_stream_window_is_retagged_without_quitting(self):
         _, connection, clients, calls = self.fake_desktop()
         shim = self.root / "helpers/bin/hyprctl"
