@@ -48,7 +48,12 @@ without invoking a shell. See the [desktop entry Exec specification](https://spe
 Moonlight Qt 6.1 and 6.2 hardcode a common Wayland app ID and overwrite SDL
 WM-class environment variables. 6.2 drops the `.desktop` suffix from
 `setDesktopFileName`; Qt's app id remains `com.moonlight_stream.Moonlight`.
-A distinct desktop filename does not change the stream window's class. See
+On sdl2-compat the SDL stream window does not: that library copies
+`SDL_VIDEO_WAYLAND_WMCLASS` before `main`, and Moonlight sets it later, so the
+surface app id falls back to the executable name (`moonlight` or
+`moonlight-qt`). The daemon sets `SDL_APP_ID` on the client process and
+accepts those executable names as well as the Qt app id. A distinct desktop
+filename does not change the stream window's class. See
 [Moonlight 6.1 source](https://github.com/moonlight-stream/moonlight-qt/blob/v6.1.0/app/main.cpp)
 and [Moonlight 6.2 source](https://github.com/moonlight-stream/moonlight-qt/blob/v6.2.0/app/main.cpp).
 No Moonlight fork or library injection is required here. The typed log lines

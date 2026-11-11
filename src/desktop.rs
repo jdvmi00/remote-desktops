@@ -46,6 +46,16 @@ pub fn fit_key(monitor: &str, workspace: i64) -> String {
     format!("{monitor}:{workspace}")
 }
 pub const CLASS: &str = "com.moonlight_stream.Moonlight";
+/// Qt sets the desktop file name. Moonlight 6.2's SDL window does not: it
+/// `qputenv`s `SDL_VIDEO_WAYLAND_WMCLASS` after sdl2-compat has already copied
+/// the process environment, so the stream surface falls back to the executable
+/// name (`moonlight` or `moonlight-qt`).
+pub fn stream_class(class: &str) -> bool {
+    matches!(
+        class,
+        CLASS | "com.moonlight_stream.Moonlight.desktop" | "moonlight" | "moonlight-qt"
+    )
+}
 fn command() -> Command {
     let mut cmd = Command::new("hyprctl");
     if let Ok(instance) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
@@ -366,6 +376,14 @@ mod tests {
         assert_eq!(monitor_resolution(&m).unwrap(), "2560x6144");
         m["width"] = serde_json::json!(0);
         assert!(monitor_resolution(&m).is_err());
+    }
+    #[test]
+    fn stream_class_accepts_qt_and_sdl_app_ids() {
+        assert!(stream_class(CLASS));
+        assert!(stream_class("moonlight"));
+        assert!(stream_class("moonlight-qt"));
+        assert!(!stream_class("kitty"));
+        assert!(!stream_class(""));
     }
     #[test]
     fn lua_strings_never_interpolate_code() {

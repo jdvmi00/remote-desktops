@@ -115,7 +115,19 @@ const STARTUP_LIMIT: Duration = Duration::from_secs(2);
 fn same_launch(left: &str, right: &str) -> bool {
     left.split_once(':').map(|part| part.0) == right.split_once(':').map(|part| part.0)
 }
-fn startup_ready(pending: &mut BTreeMap<String, Startup>, name: &str, key: &str) -> bool {
+fn startup_ready(
+    pending: &mut BTreeMap<String, Startup>,
+    name: &str,
+    key: &str,
+    fullscreen: i64,
+) -> bool {
+    // Client fullscreen means SDL has finished recreating the surface.
+    // A title that arrives only after that recreate must be tagged on sight;
+    // another 500ms wait leaves the adopted window unset while `open` waits.
+    if fullscreen >= 2 {
+        pending.remove(name);
+        return true;
+    }
     let now = Instant::now();
     match pending.get_mut(name) {
         Some(entry) if entry.key == key => {
@@ -653,7 +665,7 @@ impl Manager {
             // A window whose process has already exited is a stale snapshot
             // entry, not a live view; the compositor drops it moments later.
             if self.windows.borrow().iter().any(|w| {
-                w.class == desktop::CLASS
+                desktop::stream_class(&w.class)
                     && Some(w.title.as_str()) == r.config["title"].as_str()
                     && !owned_pids.contains(&w.pid)
                     && std::path::Path::new(&format!("/proc/{}", w.pid)).exists()
@@ -776,7 +788,7 @@ impl Manager {
                 .iter()
                 .find(|w| {
                     Some(w.pid) == job.pid
-                        && w.class == desktop::CLASS
+                        && desktop::stream_class(&w.class)
                         && Some(w.title.as_str()) == r.config["title"].as_str()
                 })
                 .cloned();
@@ -784,7 +796,8 @@ impl Manager {
             if let Some(w) = &window {
                 let key = format!("{}:{}:{}", job.token, w.pid, w.stable_id);
                 if r.initialized_window.as_ref() != Some(&key) {
-                    let ready = startup_ready(&mut self.startup.lock().unwrap(), name, &key);
+                    let ready =
+                        startup_ready(&mut self.startup.lock().unwrap(), name, &key, w.fullscreen);
                     if !ready {
                         // Stay in connecting until the surface stops being
                         // replaced. Recording window-ready here would focus a

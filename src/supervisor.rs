@@ -161,6 +161,11 @@ pub fn run(directory: &Path, token: &str, runtime: &Path) -> Result<()> {
     command
         .args(&record.argv[1..])
         .env(TOKEN, token)
+        // sdl2-compat copies this at process start, before Moonlight's own
+        // qputenv. Set it here so the SDL stream window keeps the Qt app id.
+        .env("SDL_APP_ID", crate::desktop::CLASS)
+        .env("SDL_VIDEO_WAYLAND_WMCLASS", crate::desktop::CLASS)
+        .env("SDL_VIDEO_X11_WMCLASS", crate::desktop::CLASS)
         .stdin(Stdio::null())
         .stdout(writer.try_clone()?)
         .stderr(writer);
