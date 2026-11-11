@@ -139,6 +139,77 @@ fn editable(id: &str, c: &Value, rev: &str) -> Value {
 }
 // Only the common stream settings and display recovery settings cross the UI
 // boundary; other profile fields are preserved by the merge below.
+/// Replace one computer in the configuration that was just read under the lock.
+/// Sibling computers stay as they are on disk; a stale in-memory map cannot
+/// publish a file that dropped them.
+fn merge_saved(current: &Value, id: &str, edited: &Value) -> Result<Value> {
+    let mut published = current.clone();
+    published
+        .as_object_mut()
+        .context("invalid computers schema")?
+        .get_mut("computers")
+        .and_then(Value::as_object_mut)
+        .context("invalid computers schema")?
+        .insert(id.to_string(), edited.clone());
+    Ok(published)
+}
+fn session_owns_pairing(paths: &Paths, pairing: &str, except: Option<&str>) -> Result<bool> {
+    let entries = match std::fs::read_dir(paths.state.join("sessions")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if except == Some(name.as_ref()) {
+            continue;
+        }
+        let saved = entry.path().join("session.json");
+        if saved.exists() {
+            let record: Value = storage::read(&saved)?;
+            if record["config"]["pairing_uuid"]
+                .as_str()
+                .is_some_and(|owner| owner.eq_ignore_ascii_case(pairing))
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+fn pairing_change_ready(paths: &Paths, id: &str) -> Result<()> {
+    let directory = paths.session(id);
+    let session = directory.join("session.json");
+    if session.exists() {
+        let record: Value = storage::read(&session)?;
+        if record["desired"] == true
+            || !matches!(record["phase"].as_str(), Some("idle" | "attention"))
+        {
+            bail!(
+                "Disconnect this computer and wait until it is idle before changing its pairing identity."
+            );
+        }
+    }
+    let recovery = directory.join("recovery.json");
+    if recovery.exists() && host::pending(&recovery)? {
+        bail!("restore-pending: finish host recovery before changing the pairing identity");
+    }
+    Ok(())
+}
+fn paired_host<'a>(hosts: &'a Value, pairing: &str) -> Result<&'a Value> {
+    hosts
+        .as_array()
+        .context("invalid pairing list")?
+        .iter()
+        .find(|host| {
+            host["pairing_uuid"]
+                .as_str()
+                .is_some_and(|saved| saved.eq_ignore_ascii_case(pairing))
+        })
+        .context("Pair this computer in Moonlight, then save the new pairing identity.")
+}
 fn redact_profiles(draft: &mut Value) {
     if let Some(profiles) = draft["profiles"].as_object_mut() {
         for p in profiles.values_mut() {
@@ -172,49 +243,53 @@ async fn candidate(paths: &Paths, mut value: Value, draft: &Value) -> Result<Val
         .as_object_mut()
         .context("invalid computers schema")?;
     let mut computer = if let Some(old) = computers.get(id) {
-        if draft.get("pairing_uuid").is_some() {
-            bail!("Computer already exists; reopen it to edit.");
-        }
         if old["profiles"].get(profile).is_none() {
             bail!("unknown profile");
         }
-        old.clone()
+        let mut computer = old.clone();
+        if let Some(pairing) = draft["pairing_uuid"].as_str() {
+            let current = computer["pairing_uuid"].as_str().unwrap_or("");
+            if !current.eq_ignore_ascii_case(pairing) {
+                pairing_change_ready(paths, id)?;
+                let hosts = host::call(json!({"operation":"paired"})).await?;
+                let known = paired_host(&hosts, pairing)?;
+                if computers.iter().any(|(other, saved)| {
+                    other != id
+                        && saved["pairing_uuid"]
+                            .as_str()
+                            .is_some_and(|owner| owner.eq_ignore_ascii_case(pairing))
+                }) {
+                    bail!("two computers refer to the same pairing identity");
+                }
+                if session_owns_pairing(paths, pairing, Some(id))? {
+                    bail!(
+                        "This computer has a saved session. Restore its original configuration before adding it again."
+                    );
+                }
+                let name = known["name"]
+                    .as_str()
+                    .context("Moonlight computer needs a name")?;
+                computer["pairing_uuid"] = known["pairing_uuid"].clone();
+                // Moonlight titles the stream window from the paired hostname.
+                computer["title"] = json!(format!("{name} - Moonlight"));
+            }
+        }
+        computer
     } else {
         let pairing = draft["pairing_uuid"]
             .as_str()
             .context("choose a paired computer")?;
         let hosts = host::call(json!({"operation":"paired"})).await?;
-        let known = hosts
-            .as_array()
-            .context("invalid pairing list")?
-            .iter()
-            .find(|v| v["pairing_uuid"].as_str() == Some(pairing))
+        let known = paired_host(&hosts, pairing)
             .context("Pair this computer in Moonlight, then refresh setup.")?;
         // Reusing a removed computer's identity under a new ID could create a
         // second recovery owner. Require restoring its original configuration.
-        let entries = match std::fs::read_dir(paths.state.join("sessions")) {
-            Ok(entries) => Some(entries),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e.into()),
-        };
-        if let Some(entries) = entries {
-            for entry in entries {
-                let entry = entry?;
-                let saved = entry.path().join("session.json");
-                if saved.exists() {
-                    let record: Value = storage::read(&saved)?;
-                    if record["config"]["pairing_uuid"]
-                        .as_str()
-                        .is_some_and(|p| p.eq_ignore_ascii_case(pairing))
-                    {
-                        bail!(
-                            "This computer has a saved session. Restore its original configuration before adding it again."
-                        );
-                    }
-                }
-            }
+        if session_owns_pairing(paths, pairing, None)? {
+            bail!(
+                "This computer has a saved session. Restore its original configuration before adding it again."
+            );
         }
-        json!({"pairing_uuid":pairing,"title":format!("{} - Moonlight", known["name"].as_str().context("Moonlight computer needs a name")?),
+        json!({"pairing_uuid":known["pairing_uuid"],"title":format!("{} - Moonlight", known["name"].as_str().context("Moonlight computer needs a name")?),
             "profiles":{profile:{"display":{"adapter":"external"},"decoder":"auto"}}})
     };
     for key in ["name", "host", "platform"] {
@@ -449,7 +524,8 @@ pub async fn run(paths: &Paths, action: &Action) -> Result<Value> {
                 storage::private_dir(paths.config.parent().context("missing config directory")?)?;
                 let _lock = storage::lock(&paths.config.with_extension("lock"), true)
                     .context("Another settings save is in progress. Try again.")?;
-                if revision(&load(paths)?) != draft["revision"].as_str().unwrap_or("") {
+                let current = load(paths)?;
+                if revision(&current) != draft["revision"].as_str().unwrap_or("") {
                     bail!("Settings changed elsewhere. Close setup and reopen it before saving.");
                 }
                 if paths
@@ -459,7 +535,16 @@ pub async fn run(paths: &Paths, action: &Action) -> Result<Value> {
                 {
                     bail!("Configuration is a symbolic link. Edit its source file directly.");
                 }
-                storage::write(&paths.config, &next)?;
+                let id = draft["computer"].as_str().unwrap();
+                let edited = next["computers"]
+                    .get(id)
+                    .cloned()
+                    .context("missing edited computer")?;
+                // Publish only that one computer into the file read under the
+                // lock, so a stale snapshot cannot replace the other computers.
+                let published = merge_saved(&current, id, &edited)?;
+                host::call(json!({"operation":"validate-value","value":published})).await?;
+                storage::write(&paths.config, &published)?;
                 Ok(json!({"saved":true,"computer":draft["computer"]}))
             }
         }
@@ -493,5 +578,19 @@ mod inspection_tests {
                     .clone()
             );
         }
+    }
+
+    #[test]
+    fn save_merges_one_computer_into_the_locked_configuration() {
+        let current = json!({"version":1,"extra":"keep","computers":{
+            "macbook":{"host":"old","pairing_uuid":"one"},
+            "work-laptop":{"host":"work","pairing_uuid":"two"}
+        }});
+        let edited = json!({"host":"new","pairing_uuid":"one"});
+        let published = merge_saved(&current, "macbook", &edited).unwrap();
+        assert_eq!(published["computers"]["macbook"], edited);
+        assert_eq!(published["computers"]["work-laptop"]["host"], "work");
+        assert_eq!(published["extra"], "keep");
+        assert_eq!(published["computers"].as_object().unwrap().len(), 2);
     }
 }

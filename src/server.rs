@@ -16,7 +16,7 @@ use std::{
     },
     process::Stdio,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -103,6 +103,51 @@ impl Session {
             || self.settings["display"]["adapter"] == "sunshine"
     }
 }
+/// First sighting of a stream window. Moonlight 6.2 recreates the Wayland
+/// surface when SDL enters fullscreen, so the first match is not stable.
+struct Startup {
+    key: String,
+    since: Instant,
+    attempt: Instant,
+}
+const STARTUP_STABLE: Duration = Duration::from_millis(500);
+const STARTUP_LIMIT: Duration = Duration::from_secs(2);
+fn same_launch(left: &str, right: &str) -> bool {
+    left.split_once(':').map(|part| part.0) == right.split_once(':').map(|part| part.0)
+}
+fn startup_ready(pending: &mut BTreeMap<String, Startup>, name: &str, key: &str) -> bool {
+    let now = Instant::now();
+    match pending.get_mut(name) {
+        Some(entry) if entry.key == key => {
+            entry.since.elapsed() >= STARTUP_STABLE || entry.attempt.elapsed() >= STARTUP_LIMIT
+        }
+        Some(entry) => {
+            let attempt = if same_launch(&entry.key, key) {
+                entry.attempt
+            } else {
+                now
+            };
+            let due = now.saturating_duration_since(attempt) >= STARTUP_LIMIT;
+            *entry = Startup {
+                key: key.to_string(),
+                since: now,
+                attempt,
+            };
+            due
+        }
+        None => {
+            pending.insert(
+                name.to_string(),
+                Startup {
+                    key: key.to_string(),
+                    since: now,
+                    attempt: now,
+                },
+            );
+            false
+        }
+    }
+}
 pub struct Manager {
     pub paths: Paths,
     // Resolved once at startup: a rebuilt binary leaves /proc/self/exe
@@ -111,6 +156,7 @@ pub struct Manager {
     sessions: Mutex<BTreeMap<String, Session>>,
     wakes: Mutex<BTreeMap<String, watch::Sender<u64>>>,
     windows: watch::Receiver<Vec<Window>>,
+    startup: Mutex<BTreeMap<String, Startup>>,
 }
 impl Manager {
     fn get(&self, name: &str) -> Result<Session> {
@@ -737,19 +783,55 @@ impl Manager {
             if let Some(w) = &window {
                 let key = format!("{}:{}:{}", job.token, w.pid, w.stable_id);
                 if r.initialized_window.as_ref() != Some(&key) {
+                    let ready = startup_ready(&mut self.startup.lock().unwrap(), name, &key);
+                    if !ready {
+                        // Stay in connecting until the surface stops being
+                        // replaced. Recording window-ready here would focus a
+                        // window Moonlight is about to destroy.
+                        return Ok(Duration::from_millis(100));
+                    }
                     // Consume startup policy durably before dispatch: a crash
                     // must not cause a restart to undo a later user choice.
                     r = self
                         .update(name, |r| r.initialized_window = Some(key))
                         .await?;
-                    if let Err(e) =
-                        desktop::initialize(w, name, r.settings["display_mode"] == "fullscreen")
-                            .await
-                    {
-                        self.update(name, |r| {
-                            r.error = Some(format!("window initialization: {e}"))
-                        })
-                        .await?;
+                    // Moonlight's own --display-mode fullscreen already asks
+                    // the compositor. A second fullscreen_state while SDL is
+                    // recreating the surface closes that window, and Moonlight
+                    // treats the close as a quit. Tag only once fullscreen is
+                    // already in effect; still override a tiled startup rule.
+                    let wants_fullscreen = r.settings["display_mode"] == "fullscreen";
+                    let fullscreen = if wants_fullscreen && w.fullscreen >= 2 {
+                        None
+                    } else {
+                        Some(wants_fullscreen)
+                    };
+                    match desktop::initialize(w, name, fullscreen).await {
+                        Err(error) if desktop::identity_lost(&error) => {
+                            // The surface was replaced. Do not record a stream
+                            // failure and do not signal the client; retry on
+                            // the window that replaced it.
+                            self.startup.lock().unwrap().remove(name);
+                            self.update(name, |r| r.initialized_window = None).await?;
+                            return Ok(Duration::from_millis(100));
+                        }
+                        Err(error) => {
+                            self.startup.lock().unwrap().remove(name);
+                            self.update(name, |r| {
+                                r.error = Some(format!(
+                                    "window rule was not applied: {error}. The stream is still running."
+                                ))
+                            })
+                            .await?;
+                        }
+                        Ok(()) => {
+                            self.startup.lock().unwrap().remove(name);
+                            if r.error.as_deref().is_some_and(|message| {
+                                message.starts_with("window rule was not applied")
+                            }) {
+                                r = self.update(name, |r| r.error = None).await?;
+                            }
+                        }
                     }
                     // A refit restart may reopen the window on the active
                     // workspace; return it to where the user had put it.
@@ -937,6 +1019,7 @@ pub async fn serve(paths: Paths) -> Result<()> {
         sessions: Mutex::new(sessions),
         wakes: Mutex::new(BTreeMap::new()),
         windows: desktop::observe().await?,
+        startup: Mutex::new(BTreeMap::new()),
     });
     let names = manager
         .sessions

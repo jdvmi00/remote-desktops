@@ -73,6 +73,20 @@ fn publish(directory: &Path, runtime: &Path, name: &str, job: &Job) -> Result<()
     }
     Ok(())
 }
+/// Moonlight 6.1 and 6.2 emit the same typed lines. Anything else stays usable
+/// but its logs are not turned into session evidence.
+pub fn parser_id(version: &str) -> &'static str {
+    if version.starts_with("6.1.") {
+        "moonlight-qt-6.1"
+    } else if version.starts_with("6.2.") {
+        "moonlight-qt-6.2"
+    } else {
+        "unsupported-version"
+    }
+}
+pub fn parser_supported(version: &str) -> bool {
+    parser_id(version) != "unsupported-version"
+}
 pub fn log_event(line: &str) -> Option<Value> {
     if line.contains("://") || line.len() > 4096 {
         return None;
@@ -173,12 +187,11 @@ pub fn run(directory: &Path, token: &str, runtime: &Path) -> Result<()> {
         publish(directory, runtime, &name, &job)
     })?;
     drop(gate);
-    let supported = record.client_version.starts_with("6.1.");
-    job.evidence["parser"] = json!(if supported {
-        "moonlight-qt-6.1"
-    } else {
-        "unsupported-version"
-    });
+    let supported = parser_supported(&record.client_version);
+    job.evidence["parser"] = json!(parser_id(&record.client_version));
+    // Publish before reading logs so an unsupported client is visible while
+    // it is still running. Its lines are not turned into evidence.
+    publish(directory, runtime, &name, &job)?;
     let shutdown = reader.try_clone()?;
     let log_directory = directory.to_path_buf();
     let log_runtime = runtime.to_path_buf();
@@ -244,6 +257,15 @@ mod tests {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ECHILD)
         );
+    }
+    #[test]
+    fn parser_accepts_moonlight_6_1_and_6_2_only() {
+        assert_eq!(parser_id("6.1.0"), "moonlight-qt-6.1");
+        assert_eq!(parser_id("6.2.0"), "moonlight-qt-6.2");
+        assert!(parser_supported("6.2.1"));
+        assert_eq!(parser_id("6.2"), "unsupported-version");
+        assert_eq!(parser_id("6.3.0"), "unsupported-version");
+        assert_eq!(parser_id("unknown"), "unsupported-version");
     }
     #[test]
     fn logs_keep_only_typed_evidence() {
