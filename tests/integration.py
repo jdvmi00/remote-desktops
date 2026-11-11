@@ -132,7 +132,37 @@ class BackendTests(unittest.TestCase):
             if self.daemon:
                 self.stop_daemon()
         finally:
-            self.temp.cleanup()
+            # A host helper blocked on `hold` wakes and writes the session
+            # directory while it is being removed. Python 3.14 then fails
+            # rmdir with ENOTEMPTY. Stop those processes and retry.
+            self.reap_fixture_processes()
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    self.temp.cleanup()
+                    break
+                except OSError:
+                    self.reap_fixture_processes()
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.05)
+
+    def reap_fixture_processes(self):
+        root = str(self.root)
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit() or int(entry.name) == os.getpid():
+                continue
+            try:
+                command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+                cwd = os.readlink(entry / "cwd")
+            except OSError:
+                continue
+            if command.find(root) == -1 and not cwd.startswith(root):
+                continue
+            try:
+                os.kill(int(entry.name), signal.SIGKILL)
+            except OSError:
+                pass
 
     def cli(self, *args, check=True):
         p = subprocess.run([str(BIN), "--json", *args], env=self.env, capture_output=True, text=True, timeout=5)
