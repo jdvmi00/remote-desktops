@@ -20,6 +20,9 @@ def health(record, host):
     if host.display["adapter"] == "virtual":
         from . import sunshine_display
         return sunshine_display.health(record, host)
+    if host.display["adapter"] == "mac-virtual":
+        from . import mac_virtual
+        return mac_virtual.health(record, host)
     observed = host.remote("status" if host.display["adapter"] == "windows" else "probe")
     if host.display["adapter"] == "windows":
         require(not observed.get("error"), observed.get("error"))
