@@ -10,16 +10,56 @@ use tokio::{
     process::Command,
 };
 
-pub fn helpers() -> PathBuf {
-    std::env::var_os("REMOTE_DESKTOPS_HELPERS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/helpers.rs"));
+}
+/// Directory holding the `remote_desktops` Python package. The helpers are
+/// built into this binary and unpacked once per build, so an installed copy
+/// never runs whatever a source checkout currently contains.
+/// `REMOTE_DESKTOPS_HELPERS` points development and tests at a live tree.
+pub fn helpers() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("REMOTE_DESKTOPS_HELPERS") {
+        return Ok(PathBuf::from(path));
+    }
+    unpack(&crate::storage::Paths::new()?.runtime)
+}
+fn unpack(runtime: &Path) -> Result<PathBuf> {
+    let target = runtime.join(format!("helpers-{}", embedded::ID));
+    if target.join(".complete").exists() {
+        return Ok(target);
+    }
+    crate::storage::private_dir(runtime)?;
+    // Write a private staging copy and rename it into place: a concurrent
+    // command sees either no snapshot or a complete one.
+    let staging = runtime.join(format!(".helpers-{}", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        for (name, bytes) in embedded::FILES {
+            let path = staging.join(name);
+            std::fs::create_dir_all(path.parent().context("helper file needs a parent")?)?;
+            std::fs::write(path, bytes)?;
+        }
+        std::fs::write(staging.join(".complete"), embedded::ID)?;
+        match std::fs::rename(&staging, &target) {
+            // Another command finished the same snapshot first.
+            Err(_) if target.join(".complete").exists() => Ok(()),
+            // A directory without the marker is not a snapshot; replace it.
+            Err(_) => {
+                std::fs::remove_dir_all(&target)?;
+                Ok(std::fs::rename(&staging, &target)?)
+            }
+            Ok(()) => Ok(()),
+        }
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    result.context("unpack host helpers")?;
+    Ok(target)
 }
 pub async fn call(request: Value) -> Result<Value> {
+    let helpers = helpers()?;
     let mut child = Command::new("python3")
         .args(["-m", "remote_desktops.worker"])
-        .current_dir(helpers())
-        .env("PYTHONPATH", helpers())
+        .current_dir(&helpers)
+        .env("PYTHONPATH", &helpers)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -73,4 +113,40 @@ pub fn journal_pending(record: &Value) -> Result<bool> {
         .as_object()
         .context("invalid recovery journal; recovery retained")?
         .is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn helpers_unpack_once_into_a_snapshot_named_after_their_content() {
+        let runtime = tempfile::tempdir().unwrap();
+        let first = unpack(runtime.path()).unwrap();
+        assert_eq!(
+            first.file_name().unwrap().to_string_lossy(),
+            format!("helpers-{}", embedded::ID)
+        );
+        let worker = first.join("remote_desktops/worker.py");
+        let source = concat!(env!("CARGO_MANIFEST_DIR"), "/remote_desktops/worker.py");
+        assert_eq!(
+            std::fs::read(&worker).unwrap(),
+            std::fs::read(source).unwrap()
+        );
+        assert!(first.join("remote_desktops/windows/Guard.ps1").exists());
+        // A directory without the marker is replaced by a real snapshot.
+        let broken = tempfile::tempdir().unwrap();
+        std::fs::create_dir(broken.path().join(format!("helpers-{}", embedded::ID))).unwrap();
+        let repaired = unpack(broken.path()).unwrap();
+        assert!(repaired.join("remote_desktops/worker.py").exists());
+        // A complete snapshot is reused as it is, never rewritten.
+        std::fs::write(&worker, "# marker").unwrap();
+        assert_eq!(unpack(runtime.path()).unwrap(), first);
+        assert_eq!(std::fs::read_to_string(&worker).unwrap(), "# marker");
+        let staging: Vec<_> = std::fs::read_dir(runtime.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".helpers-"))
+            .collect();
+        assert!(staging.is_empty());
+    }
 }

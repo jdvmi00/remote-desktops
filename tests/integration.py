@@ -54,6 +54,9 @@ else:
             assert request['keep_host_settings'] is True
             record['journal']={}; result={'complete':True}
         elif action=='health':
+            if (path.parent/'verification-lost').exists():
+                print(json.dumps({'ok':False,'error':'display-verification-lost: Sunshine log exceeded the observation bound or changed; reconnect to verify'}))
+                sys.exit(0)
             if record['settings'].get('display',{}).get('adapter')=='virtual':
                 record['resolved']['host_display']={'verified':True,'resolution':record.get('stream_resolution','1920x1080'),'checked_at':int(time.time())}
                 persist()
@@ -65,16 +68,22 @@ print(json.dumps({'ok':True,'result':result}))
 '''
 
 CLIENT = r'''
-import os, signal, sys, time
+import json, os, signal, sys, time
 from pathlib import Path
 directory=Path(sys.argv[1])
+(directory/'environment').write_text(json.dumps({key:os.environ.get(key) for key in ('WAYLAND_DISPLAY','HYPRLAND_INSTANCE_SIGNATURE')}))
 with (directory/'launches').open('a') as log: log.write(str(os.getpid())+' '+(sys.argv[2] if len(sys.argv)>2 else '')+'\n')
 def close(*_):
     print('Quit event received',flush=True)
     raise SystemExit(0)
 signal.signal(signal.SIGTERM,close)
 print('Video stream is 2560x1440x60 (format 0x100)',flush=True)
-while True: time.sleep(60)
+while True:
+    if (directory/'drop').exists():
+        (directory/'drop').unlink()
+        print('Connection terminated: -100',flush=True)
+        raise SystemExit(1)
+    time.sleep(.05)
 '''
 
 
@@ -921,6 +930,514 @@ class BackendTests(unittest.TestCase):
         config.write_text(json.dumps(value))
         self.assertNotEqual(self.cli("refit", "laptop", check=False).returncode, 0)
 
+    def stream_window(self, pid, number, **fields):
+        return {"address": f"0x{number}", "pid": pid, "stableId": str(122 + number),
+                "class": "com.moonlight_stream.Moonlight", "title": "laptop - Moonlight", "mapped": True,
+                "hidden": False, "visible": True, "monitor": 0, "workspace": {"id": 1}, "at": [20, 60],
+                "size": [1100, 760], "floating": False, "fullscreen": 0, **fields}
+
+    def test_every_restart_returns_the_window_to_its_workspace_and_floating_geometry(self):
+        monitor = {"id": 0, "name": "DP-1", "width": 3840, "height": 2160, "scale": 1, "focused": True, "activeWorkspace": {"id": 1}}
+        server, connection, clients, calls = self.fake_desktop([monitor])
+        pid = self.connect()
+        floated = {"floating": True, "tags": ["omarchy-floating-workspace", "omarchy-mode-opened*"]}
+        window = self.stream_window(pid, 1, workspace={"id": 3}, **floated)
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        # The user drags the floating window. Hyprland sends no event for that,
+        # so only a fresh look at close time can know where it is.
+        window.update(at=[400, 300], size=[1600, 900])
+        clients.write_text(json.dumps([window]))
+        calls.write_text("")
+        self.cli("reconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["pid"] not in (None, pid), timeout=8)
+        second = self.cli("status", "laptop")["pid"]
+        # The replacement opens on the active workspace at the mode's generic size.
+        clients.write_text(json.dumps([self.stream_window(second, 2, **floated)]))
+        connection.sendall(b"closewindow>>0x1\nopenwindow>>0x2\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        self.wait(lambda: "x=400,y=300,relative=false" in calls.read_text())
+        commands = calls.read_text()
+        self.assertIn("hl.dsp.window.move({window='address:'..w.address,workspace=3,follow=false})", commands)
+        self.assertIn("hl.dsp.window.resize({window='address:'..w.address,x=1600,y=900,relative=false})", commands)
+        # Already floating, and its own size is restored: no float toggle and
+        # no stream-shaped resize in the middle of the monitor. A window the
+        # workspace mode floated keeps its shape while dragged, as at first launch.
+        self.assertNotIn("window.float", commands)
+        self.assertNotIn("window.center", commands)
+        self.assertEqual(commands.count("keep_aspect_ratio"), 1)
+        # The stream drops on its own (Moonlight error -100). The retry's window
+        # opens tiled on the active workspace and still goes back.
+        window = self.stream_window(second, 2, workspace={"id": 3}, at=[400, 300], size=[1600, 900], floating=True)
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"movewindow>>0x2,3\n")
+        self.wait(lambda: (self.cli("status", "laptop")["window"] or {}).get("workspace") == 3)
+        calls.write_text("")
+        (self.session() / "drop").touch()
+        self.wait(lambda: self.cli("status", "laptop")["pid"] not in (None, second), timeout=10)
+        third = self.cli("status", "laptop")["pid"]
+        clients.write_text(json.dumps([self.stream_window(third, 3)]))
+        connection.sendall(b"closewindow>>0x2\nopenwindow>>0x3\n")
+        self.wait(lambda: "x=400,y=300,relative=false" in calls.read_text())
+        commands = calls.read_text()
+        self.assertIn("workspace=3,follow=false", commands)
+        self.assertIn("hl.dsp.window.float({window='address:'..w.address,action='on'})", commands)
+        self.assertIn("x=1600,y=900,relative=false", commands)
+        self.assertEqual(self.cli("status", "laptop")["pid"], third)
+        # Placement is applied once; a later event does not move the window again.
+        calls.write_text("")
+        connection.sendall(b"activewindow>>0x3\n")
+        time.sleep(.4)
+        self.assertNotIn("window.move", calls.read_text())
+
+    def test_dropped_stream_returns_to_the_shape_startup_gave_its_window(self):
+        # Startup resizes a mode-floated window to the stream's shape. Hyprland
+        # reports no event for that, and the stream then drops with nothing else
+        # happening: the retry must not go back to the mode's generic size.
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        value["computers"]["laptop"]["profiles"]["desktop"]["stream_resolution"] = "2560x1440"
+        config.write_text(json.dumps(value))
+        monitor = {"id": 0, "name": "DP-1", "width": 3840, "height": 2160, "transform": 0, "scale": 1,
+                   "focused": True, "activeWorkspace": {"id": 1}}
+        server, connection, clients, calls = self.fake_desktop([monitor])
+        shim = self.root / "helpers/bin/hyprctl"
+        # The fake compositor applies a resize and a centre, as Hyprland does.
+        shim.write_text(shim.read_text().replace(
+            "else: print('ok')",
+            "elif 'eval' in sys.argv and ('window.resize' in sys.argv[-1] or 'window.center' in sys.argv[-1]):\n"
+            " import re\n"
+            " ws=json.loads((root/'clients.json').read_text())\n"
+            " m=re.search(r'x=(\\d+),y=(\\d+),relative=false', sys.argv[-1])\n"
+            " for w in ws:\n"
+            "  if m: w['size']=[int(m[1]),int(m[2])]\n"
+            "  else: w['at']=[(3840-w['size'][0])//2,(2160-w['size'][1])//2]\n"
+            " (root/'clients.json').write_text(json.dumps(ws)); print('ok')\n"
+            "else: print('ok')"))
+        floated = {"floating": True, "tags": ["omarchy-floating-workspace", "omarchy-mode-opened*"]}
+        pid = self.connect()
+        clients.write_text(json.dumps([self.stream_window(pid, 1, **floated)]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        # 70% of the monitor at 16:9, centred; recorded without any event.
+        self.assertEqual(self.cli("status", "laptop")["window"]["size"], [2560, 1440])
+        self.assertEqual(self.cli("status", "laptop")["window"]["at"], [640, 360])
+        calls.write_text("")
+        (self.session() / "drop").touch()
+        self.wait(lambda: self.cli("status", "laptop")["pid"] not in (None, pid), timeout=10)
+        second = self.cli("status", "laptop")["pid"]
+        clients.write_text(json.dumps([self.stream_window(second, 2, **floated)]))
+        connection.sendall(b"closewindow>>0x1\nopenwindow>>0x2\n")
+        self.wait(lambda: "keep_aspect_ratio" in calls.read_text())
+        commands = calls.read_text()
+        self.assertIn("x=2560,y=1440,relative=false", commands)
+        self.assertIn("x=640,y=360,relative=false", commands)
+        self.assertNotIn("x=1100,y=760", commands)
+        # The user drags and resizes the floating window; no event reports it.
+        # The periodic look notices, and the next drop returns the window there.
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        dragged = self.stream_window(second, 2, at=[900, 500], size=[1280, 720], **floated)
+        clients.write_text(json.dumps([dragged]))
+        self.wait(lambda: self.cli("status", "laptop")["window"]["at"] == [900, 500], timeout=14)
+        calls.write_text("")
+        (self.session() / "drop").touch()
+        self.wait(lambda: self.cli("status", "laptop")["pid"] not in (None, second), timeout=10)
+        third = self.cli("status", "laptop")["pid"]
+        clients.write_text(json.dumps([self.stream_window(third, 3, **floated)]))
+        connection.sendall(b"closewindow>>0x2\nopenwindow>>0x3\n")
+        self.wait(lambda: "x=900,y=500,relative=false" in calls.read_text())
+        self.assertIn("x=1280,y=720,relative=false", calls.read_text())
+
+    def test_restart_does_not_restore_a_fullscreen_windows_geometry(self):
+        monitor = {"id": 0, "name": "DP-1", "width": 3840, "height": 2160, "scale": 1, "focused": True, "activeWorkspace": {"id": 1}}
+        server, connection, clients, calls = self.fake_desktop([monitor])
+        pid = self.connect()
+        # A floating window the user made fullscreen reports the monitor's box.
+        window = self.stream_window(pid, 1, workspace={"id": 3}, floating=True, at=[400, 300], size=[1600, 900])
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        window.update(fullscreen=2, at=[0, 0], size=[3840, 2160])
+        clients.write_text(json.dumps([window]))
+        calls.write_text("")
+        self.cli("reconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["pid"] not in (None, pid), timeout=8)
+        second = self.cli("status", "laptop")["pid"]
+        clients.write_text(json.dumps([self.stream_window(second, 2)]))
+        connection.sendall(b"closewindow>>0x1\nopenwindow>>0x2\n")
+        self.wait(lambda: "workspace=3,follow=false" in calls.read_text())
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        time.sleep(.5)
+        commands = calls.read_text()
+        self.assertNotIn("window.float", commands)
+        self.assertNotIn("window.resize", commands)
+        self.assertNotIn("x=0,y=0,relative=false", commands)
+
+    def test_placement_follows_a_surface_replaced_just_after_it_was_restored(self):
+        # Moonlight can recreate its surface at any point during startup. A
+        # replacement that arrives after the restore finished is still owed it.
+        monitor = {"id": 0, "name": "DP-1", "width": 3840, "height": 2160, "scale": 1, "focused": True, "activeWorkspace": {"id": 1}}
+        server, connection, clients, calls = self.fake_desktop([monitor])
+        shim = self.root / "helpers/bin/hyprctl"
+        # Once, on the restore's last dispatch, swap the surface for a new one.
+        shim.write_text(shim.read_text().replace(
+            "else: print('ok')",
+            "elif 'eval' in sys.argv and 'x=400,y=300' in sys.argv[-1] and not (root/'swapped').exists():\n"
+            " (root/'swapped').touch()\n"
+            " ws=json.loads((root/'clients.json').read_text())\n"
+            " for w in ws: w.update(address='0x3', stableId='125')\n"
+            " (root/'clients.json').write_text(json.dumps(ws)); print('ok')\n"
+            "else: print('ok')"))
+        pid = self.connect()
+        window = self.stream_window(pid, 1, workspace={"id": 3}, floating=True, at=[400, 300], size=[1600, 900])
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        calls.write_text("")
+        self.cli("reconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["pid"] not in (None, pid), timeout=8)
+        second = self.cli("status", "laptop")["pid"]
+        clients.write_text(json.dumps([self.stream_window(second, 2)]))
+        connection.sendall(b"closewindow>>0x1\nopenwindow>>0x2\n")
+        self.wait(lambda: (self.cli("status", "laptop")["window"] or {}).get("address") == "0x3")
+        commands = calls.read_text()
+        # Both surfaces were sent to workspace 3 and given the floating geometry.
+        self.assertEqual(commands.count("workspace=3,follow=false"), 2)
+        self.assertEqual(commands.count("x=1600,y=900,relative=false"), 2)
+        self.assertEqual(commands.count("x=400,y=300,relative=false"), 2)
+        self.assertEqual(self.cli("status", "laptop")["pid"], second)
+
+    def test_surface_replaced_in_one_snapshot_takes_the_old_windows_place(self):
+        # Moonlight recreates its surface while the stream runs; the close and
+        # the open arrive as one burst, so the window is never seen missing.
+        monitor = {"id": 0, "name": "DP-1", "width": 3840, "height": 2160, "scale": 1, "focused": True, "activeWorkspace": {"id": 1}}
+        server, connection, clients, calls = self.fake_desktop([monitor])
+        pid = self.connect()
+        clients.write_text(json.dumps([self.stream_window(pid, 1, workspace={"id": 3}, floating=True, at=[400, 300], size=[1600, 900])]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        calls.write_text("")
+        clients.write_text(json.dumps([self.stream_window(pid, 2)]))
+        connection.sendall(b"closewindow>>0x1\nopenwindow>>0x2\n")
+        self.wait(lambda: "x=400,y=300,relative=false" in calls.read_text())
+        commands = calls.read_text()
+        self.assertIn("workspace=3,follow=false", commands)
+        self.assertIn("x=1600,y=900,relative=false", commands)
+        self.assertEqual(self.cli("status", "laptop")["pid"], pid)
+
+    def restart_daemon_beside_running_stream(self, server, connection, clients, window):
+        self.stop_daemon()
+        connection.close()
+        clients.write_text(json.dumps([window]))
+        self.start()
+        reattached, _ = server.accept()
+        self.addCleanup(reattached.close)
+        return reattached
+
+    def test_daemon_restart_leaves_a_surface_recreated_meanwhile_where_it_is(self):
+        # The client outlives the daemon. While the daemon is down the user
+        # moves the window and Moonlight recreates its surface there; the
+        # position recorded before the stop no longer says where it belongs.
+        server, connection, clients, calls = self.fake_desktop()
+        pid = self.connect()
+        clients.write_text(json.dumps([self.stream_window(pid, 1, workspace={"id": 3}, floating=True, at=[400, 300], size=[1600, 900])]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        calls.write_text("")
+        moved = self.stream_window(pid, 2, workspace={"id": 5}, floating=True, at=[950, 600], size=[1280, 720])
+        self.restart_daemon_beside_running_stream(server, connection, clients, moved)
+        self.wait(lambda: (self.cli("status", "laptop")["window"] or {}).get("address") == "0x2")
+        commands = calls.read_text()
+        for stale in ("workspace=3,", "x=400,y=300,", "x=1600,y=900,"):
+            self.assertNotIn(stale, commands)
+        self.assertEqual(self.cli("status", "laptop")["pid"], pid)
+
+    def test_surface_replaced_after_a_daemon_restart_still_takes_the_old_windows_place(self):
+        server, connection, clients, calls = self.fake_desktop()
+        pid = self.connect()
+        window = self.stream_window(pid, 1, workspace={"id": 3}, floating=True, at=[400, 300], size=[1600, 900])
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        # The restarted daemon sees the window where the user has since put it.
+        window.update(at=[700, 200])
+        connection = self.restart_daemon_beside_running_stream(server, connection, clients, window)
+        self.wait(lambda: self.cli("status", "laptop")["window"]["at"] == [700, 200])
+        calls.write_text("")
+        clients.write_text(json.dumps([self.stream_window(pid, 2)]))
+        connection.sendall(b"closewindow>>0x1\nopenwindow>>0x2\n")
+        self.wait(lambda: "x=700,y=200,relative=false" in calls.read_text())
+        self.assertIn("workspace=3,follow=false", calls.read_text())
+
+    def test_closing_event_socket_cannot_publish_an_older_window_list_over_a_newer_one(self):
+        # The periodic look and the socket-close look overlap: the close reads
+        # the window list first and is held, the periodic look reads the moved
+        # window. The list read last must be the one that stays.
+        _, connection, clients, calls = self.fake_desktop()
+        pid = self.connect()
+        window = self.stream_window(pid, 1, floating=True, at=[100, 100], size=[1600, 900])
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        shim = self.root / "helpers/bin/hyprctl"
+        plain = "if 'clients' in sys.argv: print((root/'clients.json').read_text())"
+        self.assertIn(plain, shim.read_text())
+        shim.write_text(shim.read_text().replace(plain, (
+            "if 'clients' in sys.argv:\n"
+            " import time\n"
+            " data=(root/'clients.json').read_text()\n"
+            " if (root/'hold-next').exists():\n"
+            "  (root/'hold-next').unlink(); (root/'holding').touch()\n"
+            "  deadline=time.monotonic()+2.8\n"
+            "  while not (root/'release').exists() and time.monotonic()<deadline: time.sleep(.01)\n"
+            " print(data)")))
+        # The next periodic look is ten seconds after the first; start the
+        # close just before it and keep the hold under the 3 s query limit.
+        time.sleep(8.7)
+        (self.root / "hold-next").touch()
+        connection.close()
+        self.wait(lambda: (self.root / "holding").exists(), timeout=2)
+        clients.write_text(json.dumps([{**window, "at": [900, 500], "size": [1280, 720]}]))
+        time.sleep(2)
+        (self.root / "release").touch()
+        self.wait(lambda: self.cli("status", "laptop")["window"]["at"] == [900, 500], timeout=12)
+        time.sleep(.5)
+        self.assertEqual(self.cli("status", "laptop")["window"]["at"], [900, 500])
+
+    def test_restart_from_a_maximized_window_still_takes_the_stream_shape(self):
+        # The maximized box is not the window's own size, so it is not restored;
+        # the replacement must then get the stream's shape like a first launch.
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        value["computers"]["laptop"]["profiles"]["desktop"]["stream_resolution"] = "2560x1440"
+        config.write_text(json.dumps(value))
+        monitor = {"id": 0, "name": "DP-1", "width": 3840, "height": 2160, "transform": 0, "scale": 1,
+                   "focused": True, "activeWorkspace": {"id": 1}}
+        server, connection, clients, calls = self.fake_desktop([monitor])
+        floated = {"floating": True, "tags": ["omarchy-floating-workspace", "omarchy-mode-opened*"]}
+        pid = self.connect()
+        window = self.stream_window(pid, 1, **floated)
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        window.update(fullscreen=1, at=[10, 40], size=[3820, 2110])
+        clients.write_text(json.dumps([window]))
+        calls.write_text("")
+        self.cli("reconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["pid"] not in (None, pid), timeout=8)
+        second = self.cli("status", "laptop")["pid"]
+        clients.write_text(json.dumps([self.stream_window(second, 2, **floated)]))
+        connection.sendall(b"closewindow>>0x1\nopenwindow>>0x2\n")
+        self.wait(lambda: "keep_aspect_ratio" in calls.read_text())
+        commands = calls.read_text()
+        self.assertIn("x=2560,y=1440,relative=false", commands)
+        self.assertIn("window.center", commands)
+        self.assertNotIn("x=3820,y=2110", commands)
+
+    def test_restart_leaves_a_window_that_was_minimized_where_it_opens(self):
+        monitor = {"id": 0, "name": "DP-1", "width": 3840, "height": 2160, "scale": 1, "focused": True, "activeWorkspace": {"id": 1}}
+        server, connection, clients, calls = self.fake_desktop([monitor])
+        pid = self.connect()
+        clients.write_text(json.dumps([self.stream_window(pid, 1, floating=True, at=[400, 300], size=[1600, 900])]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        # Omarchy's minimize parks the window on a special workspace.
+        parked = self.stream_window(pid, 1, floating=True, at=[400, 300], size=[1600, 900],
+                                    workspace={"id": -98, "name": "special:minimized"})
+        clients.write_text(json.dumps([parked]))
+        calls.write_text("")
+        self.cli("reconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["pid"] not in (None, pid), timeout=8)
+        second = self.cli("status", "laptop")["pid"]
+        clients.write_text(json.dumps([self.stream_window(second, 2)]))
+        connection.sendall(b"closewindow>>0x1\nopenwindow>>0x2\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        time.sleep(.5)
+        commands = calls.read_text()
+        self.assertIn("window.tag", commands)
+        for dispatch in ("window.move", "window.float", "window.resize"):
+            self.assertNotIn(dispatch, commands)
+
+    def test_restart_restores_geometry_after_startup_leaves_fullscreen(self):
+        # Stock Omarchy opens every Moonlight window fullscreen. Startup undoes
+        # that for a windowed profile; the placement must be judged afterwards.
+        monitor = {"id": 0, "name": "DP-1", "width": 3840, "height": 2160, "scale": 1, "focused": True, "activeWorkspace": {"id": 1}}
+        server, connection, clients, calls = self.fake_desktop([monitor])
+        shim = self.root / "helpers/bin/hyprctl"
+        shim.write_text(shim.read_text().replace(
+            "else: print('ok')",
+            "elif 'eval' in sys.argv and 'fullscreen_state' in sys.argv[-1]:\n"
+            " ws=json.loads((root/'clients.json').read_text())\n"
+            " for w in ws: w['fullscreen']=0\n"
+            " (root/'clients.json').write_text(json.dumps(ws)); print('ok')\n"
+            "else: print('ok')"))
+        pid = self.connect()
+        window = self.stream_window(pid, 1, floating=True, at=[400, 300], size=[1600, 900])
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        calls.write_text("")
+        self.cli("reconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["pid"] not in (None, pid), timeout=8)
+        second = self.cli("status", "laptop")["pid"]
+        clients.write_text(json.dumps([self.stream_window(second, 2, fullscreen=2, size=[3840, 2160], at=[0, 0])]))
+        connection.sendall(b"closewindow>>0x1\nopenwindow>>0x2\n")
+        self.wait(lambda: "x=400,y=300,relative=false" in calls.read_text())
+        commands = calls.read_text()
+        self.assertIn("internal=0,client=0", commands)
+        self.assertIn("action='on'", commands)
+        self.assertIn("x=1600,y=900,relative=false", commands)
+
+    def test_refit_measures_the_window_now_and_a_saved_resolution_change_wins(self):
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        profile = value["computers"]["laptop"]["profiles"]["desktop"]
+        profile.update(stream_resolution="2560x1440", display={"adapter": "sunshine"})
+        config.write_text(json.dumps(value))
+        monitor = {"id": 0, "name": "DP-1", "width": 3840, "height": 2160, "scale": 1, "focused": True, "activeWorkspace": {"id": 1}}
+        server, connection, clients, calls = self.fake_desktop([monitor])
+        launches = self.session() / "launches"
+        sizes = lambda: [line.split()[1] for line in launches.read_text().splitlines()]
+        pid = self.connect()
+        window = self.stream_window(pid, 1, size=[1900, 1060])
+        clients.write_text(json.dumps([window]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: (self.cli("status", "laptop")["window"] or {}).get("size") == [1900, 1060])
+        # The tile is resized. No event reports it; Refit must still see it.
+        window.update(size=[1700, 950])
+        clients.write_text(json.dumps([window]))
+        self.cli("refit", "laptop")
+        self.wait(lambda: len(sizes()) == 2 and self.cli("status", "laptop")["pid"] not in (None, pid), timeout=8)
+        self.assertEqual(sizes()[-1], "1700x950")
+        # The same profile reconnects at the fitted size.
+        self.cli("disconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "idle")
+        clients.write_text("[]")
+        connection.sendall(b"closewindow>>0x1\n")
+        self.connect()
+        self.assertEqual(sizes()[-1], "1700x950")
+        # Saving a different resolution replaces that memory.
+        self.cli("disconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "idle")
+        profile["stream_resolution"] = "3840x2160"
+        config.write_text(json.dumps(value))
+        self.connect()
+        self.assertEqual(sizes()[-1], "3840x2160")
+
+    def test_full_monitor_profile_does_not_offer_refit(self):
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        value["computers"]["laptop"]["profiles"]["desktop"].update(
+            stream_resolution="monitor", display={"adapter": "sunshine"})
+        config.write_text(json.dumps(value))
+        monitor = {"id": 0, "name": "DP-1", "width": 3840, "height": 2160, "scale": 1, "focused": True, "activeWorkspace": {"id": 1}}
+        server, connection, clients, calls = self.fake_desktop([monitor])
+        pid = self.connect()
+        clients.write_text(json.dumps([self.stream_window(pid, 1, size=[1900, 1060])]))
+        connection.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        status = self.cli("status", "laptop")
+        self.assertEqual(status["resolution"], "3840x2160")
+        self.assertFalse(status["fit_window"])
+        self.assertFalse(status["refit_available"])
+        self.assertNotEqual(self.cli("refit", "laptop", check=False).returncode, 0)
+        self.assertEqual(self.cli("status", "laptop")["pid"], pid)
+
+    def test_daemon_started_without_compositor_variables_finds_the_running_instance(self):
+        server, connection, clients, calls = self.fake_desktop()
+        self.stop_daemon()
+        connection.close()
+        # As when the first command after login comes from SSH or a TTY.
+        del self.env["HYPRLAND_INSTANCE_SIGNATURE"]
+        self.env["WAYLAND_DISPLAY"] = "wayland-elsewhere"
+        (self.root / "runtime/hypr/test-instance/hyprland.lock").write_text("4242\nwayland-test\n")
+        # A socket file left by an instance that exited is skipped.
+        stale = self.root / "runtime/hypr/stale-instance/.socket2.sock"
+        stale.parent.mkdir()
+        leftover = socket.socket(socket.AF_UNIX)
+        leftover.bind(str(stale))
+        leftover.close()
+        # A nested compositor started later is live too; the login session wins.
+        nested = self.root / "runtime/hypr/z-nested-instance/.socket2.sock"
+        nested.parent.mkdir()
+        (nested.parent / "hyprland.lock").write_text("4343\nwayland-nested\n")
+        other = socket.socket(socket.AF_UNIX)
+        self.addCleanup(other.close)
+        other.bind(str(nested))
+        other.listen(1)
+        # Start order is the lock's time. A socket added to the login
+        # instance's directory later (hyprsunset does this) must not reorder it.
+        os.utime(self.root / "runtime/hypr/test-instance/hyprland.lock", (1, 1))
+        (self.root / "runtime/hypr/test-instance/.later.sock").touch()
+        calls.write_text("")
+        self.start()
+        replacement, _ = server.accept()
+        self.addCleanup(replacement.close)
+        pid = self.connect()
+        clients.write_text(json.dumps([self.stream_window(pid, 1)]))
+        replacement.sendall(b"openwindow>>0x1\n")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "window-ready")
+        commands = [json.loads(line) for line in calls.read_text().splitlines()]
+        self.assertTrue(commands)
+        self.assertTrue(all(command[:2] == ["-i", "test-instance"] for command in commands), commands)
+        # The client opens on the compositor the daemon watches.
+        self.assertEqual(json.loads((self.session() / "environment").read_text()),
+                         {"WAYLAND_DISPLAY": "wayland-test", "HYPRLAND_INSTANCE_SIGNATURE": "test-instance"})
+
+    def test_lost_display_verification_keeps_only_a_verified_stream_running(self):
+        config = self.root / "config/remote-desktops/computers.json"
+        value = json.loads(config.read_text())
+        value["computers"]["laptop"]["profiles"]["desktop"].update(
+            stream_resolution="auto", display={"adapter": "virtual"})
+        config.write_text(json.dumps(value))
+        monitor = {"id": 0, "name": "DP-1", "width": 3840, "height": 2160, "scale": 1, "focused": True, "activeWorkspace": {"id": 1}}
+        server, connection, clients, calls = self.fake_desktop([monitor])
+        pid = self.connect()
+        clients.write_text(json.dumps([self.stream_window(pid, 1)]))
+        connection.sendall(b"openwindow>>0x1\n")
+        # The health check runs ten seconds after launch and verifies the display.
+        self.wait(lambda: self.cli("status", "laptop")["refit_available"], timeout=16)
+        (self.session() / "verification-lost").touch()
+        self.wait(lambda: "display-verification-lost" in (self.cli("status", "laptop")["error"] or ""), timeout=16)
+        status = self.cli("status", "laptop")
+        self.assertTrue(status["desired"])
+        self.assertEqual(status["pid"], pid)
+        self.assertTrue(Path(f"/proc/{pid}").exists())
+        # Verification lapses, so Refit is withdrawn until a reconnect.
+        self.wait(lambda: not self.cli("status", "laptop")["refit_available"], timeout=25)
+        self.assertTrue(self.cli("status", "laptop")["desired"])
+        # Closing the stream cleanly afterwards is not a failed connection.
+        os.kill(pid, signal.SIGTERM)
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "idle")
+        self.assertIsNone(self.cli("status", "laptop")["error"])
+        # A launch that never verified its capture display still fails closed.
+        self.cli("connect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "attention", timeout=20)
+        status = self.cli("status", "laptop")
+        self.assertFalse(status["desired"])
+        self.assertIn("display-verification-lost", status["error"])
+
+    def test_restore_does_not_close_a_connected_stream(self):
+        pid = self.connect()
+        result = self.cli("restore", "laptop", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("disconnect this computer first", result.stderr)
+        status = self.cli("status", "laptop")
+        self.assertTrue(status["desired"])
+        self.assertEqual(status["pid"], pid)
+
+    def test_next_connect_removes_job_records_of_earlier_launches(self):
+        jobs = lambda: sorted(path.name for path in self.session().glob("job-*"))
+        self.connect()
+        self.cli("reconnect", "laptop")
+        self.wait(lambda: len((self.session() / "launches").read_text().splitlines()) == 2)
+        self.cli("disconnect", "laptop")
+        self.wait(lambda: self.cli("status", "laptop")["phase"] == "idle")
+        self.assertEqual(len(jobs()), 4)
+        self.connect()
+        self.assertEqual(len(jobs()), 2)
+
     def test_keyboard_settings_conflicts_revisions_disable_and_rollback(self):
         config = self.root / "config/hypr/hyprland.lua"
         config.parent.mkdir(parents=True)
@@ -939,6 +1456,13 @@ class BackendTests(unittest.TestCase):
         draft = {**status, 'enabled': True, 'prefix': 'F12', 'timeout': 5}
         status = save(draft)
         self.assertTrue(status['enabled'])
+        self.assertFalse(status['outdated'])
+        # A block written by an earlier version of the script is reported.
+        current = config.read_text()
+        config.write_text(current.replace('local function tagged(w)', 'local function tagged(w) -- older script'))
+        self.assertTrue(self.cli('keyboard', 'status')['outdated'])
+        config.write_text(current)
+        self.assertFalse(self.cli('keyboard', 'status')['outdated'])
         self.assertEqual(config.read_text().count('-- remote-desktops: keyboard begin'), 1)
         installed = config.read_text()
         self.assertIn('changed elsewhere', save(draft, False))
@@ -1418,6 +1942,25 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(any(c["pairing_uuid"] == paired["pairing_uuid"] for c in self.cli("catalog")["paired"]))
         self.assertEqual(list(json.loads(self.config.read_text())["computers"]), ["home"])
         self.assertFalse((self.root / "state").exists())
+        # A discovery source that fails explains itself to the manager.
+        self.assertEqual(found["warnings"], [])
+        (bindir / "tailscale").write_text("#!/bin/sh\nexit 1\n")
+        self.assertIn("Tailscale discovery failed", " ".join(self.cli("discover")["warnings"]))
+
+    def test_built_in_helpers_run_without_a_source_checkout(self):
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps({"version": 1, "computers": {"home": {
+            "pairing_uuid": self.uuid, "title": "Home PC - Moonlight", "host": "home.example.net",
+            "profiles": {"desktop": {"stream_resolution": "1920x1080", "display": {"adapter": "external"}}}}}}))
+        env = {key: value for key, value in self.env.items() if key != "REMOTE_DESKTOPS_HELPERS"}
+        listed = subprocess.run([str(BIN), "computers"], env=env, cwd=self.root, capture_output=True, text=True, timeout=10)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual([c["computer"] for c in json.loads(listed.stdout)], ["home"])
+        snapshots = list((self.root / "runtime/remote-desktops").glob("helpers-*"))
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual((snapshots[0] / "remote_desktops/worker.py").read_bytes(),
+                         (ROOT / "remote_desktops/worker.py").read_bytes())
+        self.assertEqual(snapshots[0].stat().st_mode & 0o777, 0o700)
 
     def test_sunshine_without_ssh_survives_check_save_and_reopen(self):
         draft = self.draft()

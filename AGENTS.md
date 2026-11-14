@@ -52,7 +52,7 @@ release metadata, tags, or GitHub settings.
 
 - Keep the daemon, CLI, and client supervisor in Rust. Preserve the narrow Python
   host-operation boundary and its durable recovery tests when changing adapters.
-- The planned UI is a separate Qt 6/QML process. Keep video/audio/input in
+- The UI is a separate Qt 6/QML process. Keep video/audio/input in
   Moonlight/Sunshine and keep Qt dependencies out of the daemon.
 - Read `docs/ARCHITECTURE.md` before changing concurrency, IPC, supervision, or
   recovery ownership. Measure performance rather than claiming latency gains

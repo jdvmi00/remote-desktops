@@ -160,6 +160,10 @@ async fn status(text: Option<&str>) -> Result<Value> {
     }
     let available = text.is_some() && desktop::control(&["version"]).await.is_ok();
     let mut result = saved.unwrap_or_else(|| json!({"enabled":false,"prefix":"F12","timeout":5}));
+    // The managed block is a copy made when the prefix was saved. An update
+    // to the script reaches it only when the prefix is saved again.
+    let outdated = result["enabled"] == true && !text.unwrap_or_default().contains(&block(&result));
+    result["outdated"] = json!(outdated);
     result["available"] = json!(available);
     result["revision"] = json!(revision(text.unwrap_or_default()));
     Ok(result)

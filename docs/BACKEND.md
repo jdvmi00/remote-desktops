@@ -136,13 +136,22 @@ files serialize app edits and retain unfinished reload intent. No reload is requ
 profiles are not migrated; old `virtual` profiles need their capture output
 selected in setup before their next connection.
 
-A profile's `stream_resolution` is either `WIDTHxHEIGHT` or `auto`. With
-`auto` or the `sunshine` adapter the daemon launches at the last known size for the window: the size last
+A profile's `stream_resolution` is `WIDTHxHEIGHT`, `auto`, or `monitor` (the
+focused monitor's full resolution at launch). With
+`auto`, or the `sunshine` adapter and a fixed size, the daemon launches at the last known size for the window: the size last
 fitted for that monitor and workspace, or `display.initial_resolution` (falling back to the saved stream resolution, then 1920x1080) the first time.
 A connect never restarts to fit. `refit COMPUTER`, or `refit` for the focused
 Moonlight window, is the only thing that matches the stream to the window: it
-restarts once at the window's current size, remembers it, and returns the window
-to the workspace it was on. Sunshine profiles can connect without Hyprland using the saved initial or
+measures the window at that moment, restarts once at that size, and remembers
+it. The remembered size belongs to the profile's sizing as saved: after its
+resolution or host display matching is edited, the saved resolution decides the
+next launch. A `monitor` profile
+always launches at the monitor's resolution, so Refit is not offered for it.
+
+Every restart of a connected stream (Refit, `reconnect`, a host health
+reconnect, or the automatic retry after a dropped connection) returns the new
+window to the old one's workspace, and to its size and position when it was
+floating; see [window behavior](ARCHITECTURE.md#window-behavior). Sunshine profiles can connect without Hyprland using the saved initial or
 default size, including when set to `auto`. Explicit Refit requires an owned
 window. For other adapters, `auto` needs Hyprland; elsewhere the connection fails
 with `fit-unavailable`. Status reports the size in use as `resolution` with
@@ -218,6 +227,14 @@ running, the record is dropped through the daemon's `forget` command;
 otherwise the CLI holds the daemon's writer lock while deleting the directory.
 A computer removed this way can be added again from the same pairing.
 
+`restore` retries host display recovery for a session that has ended; it
+refuses a connected computer, which `disconnect` closes and restores.
+
+`keep_awake` sets when a stream window stops this computer from idling and
+locking: `visible` (the default) while the window is on screen, `always`, or
+`never`. The setting replaces Omarchy's own Moonlight rule, which inhibits idle
+only in fullscreen, for the windows this application manages.
+
 Connect/disconnect/restore/reconnect start the daemon on demand. To run it in
 the foreground for development, use `remote-desktops daemon`. A CLI command
 returning successfully means the intent was accepted; inspect `status` for
@@ -252,10 +269,12 @@ refuses an active legacy controller and refuses matching outstanding legacy
 session/recovery intent. It never adopts old journal files automatically.
 
 Desktop entries can be installed explicitly with `launcher install COMPUTER`.
-No package installer or automatic live migration is included. Run the binary
-from its checkout so it can find the Python helper package. A future package
-can supply the helper root using `REMOTE_DESKTOPS_HELPERS`; this is a local
-development/package setting, not a remote host option.
+No package installer or automatic live migration is included. The Python and
+PowerShell host helpers are built into the binary and unpacked to
+`$XDG_RUNTIME_DIR/remote-desktops/helpers-BUILD` on first use, so a copied
+binary runs the helpers it was built with and is unaffected by later changes
+to a checkout. `REMOTE_DESKTOPS_HELPERS` points a development build at a live
+helper tree instead (`scripts/dev.py` sets it); it is not a remote host option.
 
 Automated tests do not install the application or change hosts. Separately
 authorized live MacBook validation is recorded in [validation](VALIDATION.md);

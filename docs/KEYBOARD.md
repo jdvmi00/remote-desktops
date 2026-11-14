@@ -53,6 +53,11 @@ never unbound. An existing unmodified Escape binding conflicts with cancellation
 and is reported before writing. Physical-code bindings that cannot be resolved
 unambiguously are treated conservatively as conflicts.
 
+The block holds a copy of the integration script as it was when the prefix was
+saved. After an update changes that script, `keyboard status` reports
+`outdated: true` and Preferences says so; saving the prefix again installs the
+current script.
+
 Disabling keeps the chosen prefix and timeout but removes all feature handlers
 and rules from the managed block. Prefix edits apply immediately to existing
 managed windows; they do not reconnect clients or change host settings.

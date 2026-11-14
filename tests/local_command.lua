@@ -51,6 +51,8 @@ arm(); active=local_window; callbacks["window.active"](active); clean(); assert(
 active={address="0x3",class=remote.class,tags={}}; callbacks["window.active"](active); assert(not binds.F12.enabled)
 active=remote; callbacks["window.active"](active); arm()
 callbacks["window.close"](remote); clean()
+-- A managed stream window keeps the prefix under Moonlight's fallback SDL class.
+active={address="0x5",class="moonlight",tags={"remote-desktops-spark"}}; callbacks["window.active"](active); assert(binds.F12.enabled)
 -- A new managed tag on an already-focused window enables the prefix.
 active={address="0x4",class=remote.class,tags={}}; callbacks["window.active"](active)
 active.tags={"remote-desktops-other"}; callbacks["window.update_rules"](active); assert(binds.F12.enabled)

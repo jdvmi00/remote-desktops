@@ -48,37 +48,34 @@ enum Action {
         #[command(subcommand)]
         action: keyboard::Action,
     },
+    /// Start a connection and return at once; `status` shows its progress.
     Connect {
         computer: String,
         #[arg(long)]
         profile: Option<String>,
     },
-    Disconnect {
-        computer: String,
-    },
-    Reconnect {
-        computer: String,
-    },
+    /// Close the stream and restore the host's display settings.
+    Disconnect { computer: String },
+    /// Restart a connected stream, keeping its window where it is.
+    Reconnect { computer: String },
     /// Restart a fit-the-window stream to match the window now (focused if unnamed).
-    Refit {
-        computer: Option<String>,
-    },
-    Restore {
-        computer: String,
-    },
+    Refit { computer: Option<String> },
+    /// Retry restoring the host's display after a session that could not finish it.
+    Restore { computer: String },
+    /// Give up a pending host display restore and leave the host as it is now.
     Release {
         computer: String,
+        /// Required: confirms the host keeps its current display settings.
         #[arg(long)]
         keep_host_settings: bool,
     },
-    Focus {
-        computer: String,
-    },
-    Status {
-        computer: Option<String>,
-    },
+    /// Focus a connected computer's window.
+    Focus { computer: String },
+    /// Show every session, or one computer's session in full.
+    Status { computer: Option<String> },
     /// Start the background service if needed and report status; no connection is made.
     Start,
+    /// List the configured computers and their profiles.
     Computers,
     /// Guided computer setup and editing.
     Settings {
@@ -266,6 +263,11 @@ async fn run(cli: Cli) -> Result<()> {
                 );
             }
             if tokio::time::Instant::now() >= deadline {
+                if result["phase"] == "running" {
+                    bail!(
+                        "the stream is running but its window was not seen; look for it on another workspace"
+                    );
+                }
                 bail!("connection is still pending; inspect remote-desktops status {computer}");
             }
             tokio::time::sleep(Duration::from_millis(250)).await;

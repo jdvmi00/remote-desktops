@@ -68,7 +68,7 @@ ApplicationWindow {
         if (recovering) return "The last session could not finish restoring the host display. Bring the computer online, then restore before connecting again."
         if (phase === "attention") return "The last connection ended with an error. Check that the computer and Sunshine are reachable, then connect again."
         if (connected) return "Your desktop is open in its own Moonlight window. Switch to it, or reconnect to restart the client."
-        if (phase === "running") return "The Moonlight client is running, but window detection is not available in this session. Open it from your taskbar."
+        if (phase === "running") return "The Moonlight client is running, but its window was not detected. Look for it on another workspace."
         if (phase === "preflight") return "Checking that the computer and Sunshine are reachable."
         if (phase === "preparing") return "Preparing the host display for streaming."
         if (phase === "connecting") return "Starting Moonlight and waiting for its window."
@@ -402,7 +402,7 @@ ApplicationWindow {
                                     text: root.selected && root.selected.busy ? "Working…" : root.recovering ? "Restore display" : root.connected || root.phase === "running" ? "Open desktop" : root.transitioning ? root.label(root.phase) + "…" : "Connect"
                                     // A running client without an observed window cannot be focused from here.
                                     enabled: root.canAct && root.phase !== "running"
-                                    hint: root.recovering ? "Retry restoring the host display · Ctrl+Enter" : root.phase === "running" ? "No window was detected; open Moonlight from your taskbar" : root.connected ? "Focus the desktop window · Ctrl+Enter" : "Open a desktop session · Ctrl+Enter"
+                                    hint: root.recovering ? "Retry restoring the host display · Ctrl+Enter" : root.phase === "running" ? "No window was detected; look for Moonlight on another workspace" : root.connected ? "Focus the desktop window · Ctrl+Enter" : "Open a desktop session · Ctrl+Enter"
                                     onClicked: root.action()
                                 }
                                 ActionButton { text: "Cancel"; visible: root.transitioning && !!root.selected && !!root.selected.desired; enabled: !!root.selected && !root.selected.busy; hint: "Stop connecting and restore the host"; onClicked: manager.act(root.selected.computer, "disconnect") }
@@ -470,7 +470,7 @@ ApplicationWindow {
         width: Math.min(root.width - 64, 520)
         readonly property var rule: manager.windowRule || ({})
         ActionButton { objectName: "keyboardPreferences"; Layout.fillWidth: true; text: "Keyboard & local commands…"; onClicked: keyboardSettings.begin() }
-        Body { Layout.fillWidth: true; text: manager.keyboard.enabled ? manager.keyboard.prefix + ", then a local shortcut. Shared by your managed remote desktops." : "Choose how to run local shortcuts while a remote desktop has keyboard focus." }
+        Body { Layout.fillWidth: true; text: manager.keyboard.outdated ? "The local-command script has an update. Open this and save to apply it." : manager.keyboard.enabled ? manager.keyboard.prefix + ", then a local shortcut. Shared by your managed remote desktops." : "Choose how to run local shortcuts while a remote desktop has keyboard focus." }
         Divider {}
         Caption { text: "HYPRLAND" }
         Check {
