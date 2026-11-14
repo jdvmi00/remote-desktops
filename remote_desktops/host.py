@@ -122,6 +122,7 @@ def configuration_value(value):
                 require(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", ssh.get("user", "")), "Mac adapter requires ssh.user")
                 if "control_path" in ssh:
                     require(isinstance(ssh["control_path"], str) and ssh["control_path"].startswith("/"), "SSH control_path must be absolute")
+                require("alias" not in ssh or windows_display.ALIAS.fullmatch(ssh["alias"]), "invalid ssh.alias")
     return value["computers"]
 
 
@@ -153,7 +154,9 @@ class Host:
         argv = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5"]
         if ssh.get("control_path"):
             argv += ["-S", ssh["control_path"]]
-        argv += [ssh["user"] + "@" + self.computer["host"], "python3 -"]
+        # An alias names an ssh_config host whose keys and address are already
+        # set up; host stays the address Moonlight connects to.
+        argv += [ssh["user"] + "@" + (ssh.get("alias") or self.computer["host"]), "python3 -"]
         request = {"operation": operation, "adapter": self.display["adapter"], "display_uuid": self.display.get("uuid"),
                    "follow_main": self.display.get("follow_main", self.display["adapter"] == "macos"),
                    "pairing_uuid": self.computer["pairing_uuid"], "tag_id": self.display.get("tag_id"), **values}

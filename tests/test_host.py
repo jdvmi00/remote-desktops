@@ -280,6 +280,23 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(host.current, {"mode": PANEL, "output": "1"})
         self.assertTrue(s.restore(record, host, lambda: None))
 
+    def test_mac_ssh_alias_selects_the_ssh_destination_but_not_the_stream_address(self):
+        c = computer()
+        c["platform"] = "macos"
+        c["profiles"]["desktop"]["display"] = {"adapter": "macos"}
+        c["ssh"]["alias"] = "laptop"
+        self.config.write_text(json.dumps({"version": 1, "computers": {"laptop": c}}))
+        s.configuration(self.config)
+        answer = subprocess.CompletedProcess([], 0, stdout='{"ok": true, "result": {}}', stderr="")
+        with patch.object(s.subprocess, "run", return_value=answer) as run:
+            s.Host(c, c["profiles"]["desktop"]).remote("probe")
+        self.assertEqual(run.call_args.args[0][-2], c["ssh"]["user"] + "@laptop")
+        self.assertNotEqual(c["host"], "laptop")
+        c["ssh"]["alias"] = "-oProxyCommand=x"
+        self.config.write_text(json.dumps({"version": 1, "computers": {"laptop": c}}))
+        with self.assertRaisesRegex(ValueError, "invalid ssh.alias"):
+            s.configuration(self.config)
+
     def test_native_profile_needs_no_betterdisplay_uuid_or_mode(self):
         c = computer()
         c["platform"] = "macos"
