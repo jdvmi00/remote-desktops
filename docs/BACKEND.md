@@ -70,9 +70,15 @@ Sunshine must capture the main display: leave `output_name` unset in
 `sunshine.conf`; the adapter refuses to start otherwise. Remove any Sunshine
 `prep-cmd` that attaches the same screen. Sunshine checks for an active display
 before it runs app preparation commands, so the screen is attached first.
+Sunshine must run as the Homebrew service (`brew services start sunshine`,
+launchd job `sh.brew.sunshine`).
 
 Before Moonlight starts, the adapter records the current main display, attaches
-the screen, sets its mode, makes it main, and wakes it. Health checks reconnect
+the screen, sets its mode, makes it main, and wakes it. It then restarts
+Sunshine and waits until Sunshine listens again. Sunshine cannot capture a
+display that appeared after it started: the encoder test it runs before each
+launch waits for a frame that never comes, and Sunshine stays stuck until it is
+restarted. Health checks reconnect
 if the screen is lost or asleep. A check that cannot read the screen keeps the
 stream and looks again ten seconds later; after three such checks in a row it
 reconnects, and if the screen still cannot be read then, the session ends with
