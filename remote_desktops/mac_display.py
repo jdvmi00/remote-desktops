@@ -2,7 +2,8 @@
 
 No persistent remote agent is installed. REQUEST is supplied by the client.
 Only the display mode, Sunshine output_name, and (for mac-virtual) the
-attachment and main role of one BetterDisplay virtual screen can be changed.
+attachment and main role of one BetterDisplay virtual screen can be changed;
+mac-virtual also restarts Sunshine's launchd job after attaching the screen.
 """
 import json
 import ctypes
@@ -10,6 +11,7 @@ import fcntl
 import os
 from pathlib import Path
 import re
+import socket
 import subprocess
 import tempfile
 import time
@@ -161,6 +163,8 @@ FINAL_WRITE_SECONDS = 3  # Detach always gets this long to write, even past the 
 # near 40 s the client may time out first; the write still lands and restore is retried.
 HANDBACK_SECONDS = 5
 DETACH_RESERVE_SECONDS = 10  # Handing main back is optional; detaching is not.
+SUNSHINE_SERVICE = "sh.brew.sunshine"  # Homebrew's launchd job for Sunshine.
+SUNSHINE_PORT = 47984  # Sunshine listens here only after its startup encoder test.
 
 
 def sunshine_output():
@@ -174,7 +178,8 @@ def virtual_screen(request, started=None):
 
     The screen selected by tag_id belongs to streaming. Attach makes it the
     main display and wakes it before Moonlight connects, because Sunshine
-    checks for an active display before it runs any app preparation. Detach
+    checks for an active display before it runs any app preparation, then
+    restarts Sunshine so it starts with the screen. Detach
     tries to return the main role to the recorded display, then writes the
     disconnect (unless the screen already reads detached) and finishes only
     once it reads as detached.
@@ -318,7 +323,34 @@ def virtual_screen(request, started=None):
             observed = state()
             v = observed["virtual"]
             return observed if v["connected"] and v["main"] and v["active"] and not v["asleep"] else None
-        return poll(ready, bool, deadline, "virtual-display-inactive: the virtual screen is attached but not awake")
+        observed = poll(ready, bool, deadline, "virtual-display-inactive: the virtual screen is attached but not awake")
+        # Sunshine cannot capture a display that appeared after it started:
+        # the encoder test it runs before each launch waits forever for a
+        # frame, and Sunshine stays stuck. No session is running yet, so
+        # restart it now; it starts with the screen as the main display.
+        service = "gui/%d/%s" % (os.getuid(), SUNSHINE_SERVICE)
+        def sunshine_pid():
+            try:
+                found = re.search(r"^\s*pid = (\d+)$", command(["/bin/launchctl", "print", service]), re.M)
+            except ValueError:
+                raise ValueError("sunshine-restart-failed: the " + SUNSHINE_SERVICE + " launchd job is not loaded") from None
+            return found and found[1]
+        before = sunshine_pid()
+        try:
+            command(["/bin/launchctl", "kickstart", "-k", service])
+        except ValueError:
+            raise ValueError("sunshine-restart-failed: launchd did not restart Sunshine") from None
+        def listening():
+            pid = sunshine_pid()
+            if not pid or pid == before:
+                return False
+            try:
+                socket.create_connection(("127.0.0.1", SUNSHINE_PORT), timeout=.5).close()
+            except OSError:
+                return False
+            return True
+        poll(listening, bool, deadline, "sunshine-restart-failed: Sunshine did not start listening")
+        return observed
     if operation == "detach":
         # Cleanup reads only what it needs: whether the screen is attached
         # and, best effort, whether it is main. Unrelated reads cannot block it.

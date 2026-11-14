@@ -135,7 +135,9 @@ class RemoteTests(unittest.TestCase):
         self.hang = lambda argv: False
         self.timeouts = []
         self.clock = None
-        for target in (patch.object(Path, "home", return_value=root),
+        self.sunshine = {"pid": 100, "loaded": True, "listens": True, "starts": 0}
+        for target in (patch.object(mac_display.socket, "create_connection", side_effect=self.sunshine_port),
+                       patch.object(Path, "home", return_value=root),
                        patch.object(mac_display, "run", side_effect=self.betterdisplay),
                        patch.object(mac_display.ctypes, "CDLL", side_effect=lambda path: self.mac.graphics()),
                        patch.object(mac_display.time, "sleep")):
@@ -148,6 +150,8 @@ class RemoteTests(unittest.TestCase):
             if self.clock:
                 self.clock.now += timeout  # A hung command uses all the time it is given.
             raise subprocess.TimeoutExpired(argv, timeout)
+        if argv[0] == "/bin/launchctl":
+            return self.launchctl(argv)
         if argv[0] == "/usr/bin/caffeinate":
             self.woken.append(argv)
             self.mac.asleep = self.stay_asleep
@@ -157,6 +161,22 @@ class RemoteTests(unittest.TestCase):
         if result == "Failed.":
             raise ValueError("display-operation-failed")
         return result
+
+    def launchctl(self, argv):
+        # Homebrew's Sunshine job in the user's GUI domain.
+        if not self.sunshine["loaded"] or not argv[-1].endswith("/" + mac_display.SUNSHINE_SERVICE):
+            raise ValueError("display-operation-failed")
+        if argv[1] == "kickstart":
+            self.sunshine["pid"] += 1
+            self.sunshine["starts"] += 1
+            self.sunshine["screen"] = self.mac.connected
+            return ""
+        return "\tstate = running\n\tpid = %d\n" % self.sunshine["pid"]
+
+    def sunshine_port(self, address, timeout):
+        if address != ("127.0.0.1", mac_display.SUNSHINE_PORT) or not self.sunshine["listens"]:
+            raise ConnectionRefusedError
+        return type("Socket", (), {"close": lambda self: None})()
 
     def call(self, operation, **values):
         return mac_display.display({"operation": operation, "adapter": "mac-virtual", "tag_id": "7",
@@ -177,6 +197,29 @@ class RemoteTests(unittest.TestCase):
         self.assertTrue(mac_display.same_setting("mode", virtual["mode"], MODE))
         self.assertEqual(observed["main"]["uuid"], VIRTUAL)
         self.assertEqual(self.woken, [["/usr/bin/caffeinate", "-u", "-t", "1"]])
+
+    def test_attach_restarts_sunshine_with_the_screen_attached(self):
+        self.call("attach", mode=MODE)
+        self.assertEqual(self.sunshine["starts"], 1)
+        self.assertTrue(self.sunshine["screen"])
+        self.assertEqual(self.sunshine["pid"], 101)
+
+    def test_attach_fails_when_sunshine_does_not_come_back(self):
+        self.sunshine["listens"] = False
+        self.use_clock()
+        with self.assertRaisesRegex(ValueError, "sunshine-restart-failed: Sunshine did not start listening"):
+            self.call("attach", mode=MODE)
+        self.assertTrue(self.mac.connected)  # Still journaled; restore detaches it.
+
+    def test_attach_fails_when_the_sunshine_job_is_not_loaded(self):
+        self.sunshine["loaded"] = False
+        with self.assertRaisesRegex(ValueError, "sunshine-restart-failed: the sh.brew.sunshine launchd job is not loaded"):
+            self.call("attach", mode=MODE)
+
+    def test_detach_does_not_restart_sunshine(self):
+        self.call("attach", mode=MODE)
+        self.call("detach", original_main=BUILTIN)
+        self.assertEqual(self.sunshine["starts"], 1)
 
     def test_attach_fails_closed_when_the_screen_stays_asleep(self):
         self.stay_asleep = True
