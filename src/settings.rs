@@ -230,6 +230,37 @@ fn redact_profiles(draft: &mut Value) {
         }
     }
 }
+/// The display block a save may write: the adapter and its known settings.
+fn editable_display(display: &serde_json::Map<String, Value>) -> Value {
+    let adapter = display
+        .get("adapter")
+        .and_then(Value::as_str)
+        .unwrap_or("external");
+    let mut next = serde_json::Map::new();
+    next.insert("adapter".into(), json!(adapter));
+    if adapter != "external" {
+        for key in [
+            "uuid",
+            "tag_id",
+            "follow_main",
+            "require_ac",
+            "mode",
+            "device_id",
+            "output",
+            "sync_modes",
+            "settings",
+            "initial_resolution",
+        ] {
+            if let Some(v) = display.get(key)
+                && !v.is_null()
+            {
+                next.insert(key.into(), v.clone());
+            }
+        }
+    }
+    Value::Object(next)
+}
+
 async fn candidate(paths: &Paths, mut value: Value, draft: &Value) -> Result<Value> {
     if draft["revision"].as_str() != Some(&revision(&value)) {
         bail!("Settings changed elsewhere. Close setup and reopen it before saving.");
@@ -337,32 +368,7 @@ async fn candidate(paths: &Paths, mut value: Value, draft: &Value) -> Result<Val
         }
     }
     if let Some(display) = draft.get("display").and_then(Value::as_object) {
-        let adapter = display
-            .get("adapter")
-            .and_then(Value::as_str)
-            .unwrap_or("external");
-        let mut next = serde_json::Map::new();
-        next.insert("adapter".into(), json!(adapter));
-        if adapter != "external" {
-            for key in [
-                "uuid",
-                "follow_main",
-                "require_ac",
-                "mode",
-                "device_id",
-                "output",
-                "sync_modes",
-                "settings",
-                "initial_resolution",
-            ] {
-                if let Some(v) = display.get(key)
-                    && !v.is_null()
-                {
-                    next.insert(key.into(), v.clone());
-                }
-            }
-        }
-        computer["profiles"][profile]["display"] = Value::Object(next);
+        computer["profiles"][profile]["display"] = editable_display(display);
     }
     computers.insert(id.into(), computer);
     host::call(json!({"operation":"validate-value","value":value})).await?;
@@ -578,6 +584,20 @@ mod inspection_tests {
                     .clone()
             );
         }
+    }
+
+    #[test]
+    fn save_keeps_every_display_setting_an_adapter_needs() {
+        let display = json!({"adapter": "mac-virtual", "tag_id": "7", "require_ac": true,
+            "mode": {"resolution": "1920x1080", "hidpi": true, "refresh": 60}, "unknown": 1});
+        let mut expected = display.clone();
+        expected.as_object_mut().unwrap().remove("unknown");
+        assert_eq!(editable_display(display.as_object().unwrap()), expected);
+        let external = json!({"adapter": "external", "tag_id": "7"});
+        assert_eq!(
+            editable_display(external.as_object().unwrap()),
+            json!({"adapter": "external"})
+        );
     }
 
     #[test]

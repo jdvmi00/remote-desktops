@@ -13,7 +13,7 @@ import socket
 import subprocess
 from .storage import read_json
 from .mac_display import same_setting, manages_mode
-from . import virtual_display, windows_display
+from . import mac_virtual, virtual_display, windows_display
 
 NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
 UUID = re.compile(r"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}\Z")
@@ -80,7 +80,7 @@ def configuration_value(value):
             for flag in ("hdr", "yuv444"):
                 require(type(p.get(flag, False)) is bool, "invalid " + flag)
             display = p.get("display", {"adapter": "external"})
-            require(display.get("adapter") in ("external", "betterdisplay", "macos", "windows", "virtual", "sunshine"), "unknown display adapter")
+            require(display.get("adapter") in ("external", "betterdisplay", "macos", "mac-virtual", "windows", "virtual", "sunshine"), "unknown display adapter")
             if display["adapter"] == "sunshine":
                 require(computer.get("platform") == "windows", "Sunshine matching requires platform=windows")
             if display["adapter"] == "virtual":
@@ -103,11 +103,17 @@ def configuration_value(value):
             if display["adapter"] == "betterdisplay":
                 require(UUID.fullmatch(display.get("uuid", "")), "display requires a persistent UUID")
                 require(type(display.get("follow_main", False)) is bool, "follow_main must be boolean")
+            if display["adapter"] == "mac-virtual":
+                require(computer.get("platform") == "macos", "virtual screen adapter requires platform=macos")
+                require(isinstance(display.get("tag_id"), str) and re.fullmatch(r"\d{1,6}", display["tag_id"]),
+                        "virtual screen adapter requires the BetterDisplay tag_id of a virtual screen")
+                require("uuid" not in display and "follow_main" not in display, "the virtual screen is selected by tag_id and is always made main")
+            if display["adapter"] in ("betterdisplay", "mac-virtual"):
                 mode = display.get("mode", {})
                 resolution(mode.get("resolution"))
                 require(type(mode.get("hidpi")) is bool and type(mode.get("refresh")) in (int, float)
                         and 20 <= mode["refresh"] <= 240, "invalid host mode")
-            if display["adapter"] in ("betterdisplay", "macos"):
+            if display["adapter"] in ("betterdisplay", "macos", "mac-virtual"):
                 if display["adapter"] == "macos":
                     require(computer.get("platform") == "macos", "native adapter requires platform=macos")
                     require(display.get("follow_main", True) is True, "native desktop follows the main display")
@@ -116,6 +122,7 @@ def configuration_value(value):
                 require(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", ssh.get("user", "")), "Mac adapter requires ssh.user")
                 if "control_path" in ssh:
                     require(isinstance(ssh["control_path"], str) and ssh["control_path"].startswith("/"), "SSH control_path must be absolute")
+                require("alias" not in ssh or windows_display.ALIAS.fullmatch(ssh["alias"]), "invalid ssh.alias")
     return value["computers"]
 
 
@@ -147,10 +154,12 @@ class Host:
         argv = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5"]
         if ssh.get("control_path"):
             argv += ["-S", ssh["control_path"]]
-        argv += [ssh["user"] + "@" + self.computer["host"], "python3 -"]
+        # An alias names an ssh_config host whose keys and address are already
+        # set up; host stays the address Moonlight connects to.
+        argv += [ssh["user"] + "@" + (ssh.get("alias") or self.computer["host"]), "python3 -"]
         request = {"operation": operation, "adapter": self.display["adapter"], "display_uuid": self.display.get("uuid"),
                    "follow_main": self.display.get("follow_main", self.display["adapter"] == "macos"),
-                   "pairing_uuid": self.computer["pairing_uuid"], **values}
+                   "pairing_uuid": self.computer["pairing_uuid"], "tag_id": self.display.get("tag_id"), **values}
         program = "REQUEST = " + repr(request) + "\n" + Path(__file__).with_name("mac_display.py").read_text()
         p = subprocess.run(argv, input=program, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40)
         if p.returncode:
@@ -197,6 +206,14 @@ class Host:
             sunshine_display.snapshot(self)
             return {**info, "restoration": "sunshine", "display": "capture verification pending"}
         observed = self.remote("probe")
+        if self.display["adapter"] == "mac-virtual":
+            if self.display.get("require_ac", False):
+                require(observed["ac_power"] is not None, "power-unknown: the Mac's power source could not be read")
+                require(observed["ac_power"], "power-required: connect the Mac to AC")
+            require(not observed["sunshine_output"],
+                    "display-configuration-invalid: remove output_name from sunshine.conf so Sunshine captures the main display")
+            return {**info, "virtual_screen": observed["virtual"], "ac_power": observed["ac_power"],
+                    "lid_closed": observed["lid_closed"], "restoration": "managed", "display": "virtual screen"}
         if self.display["adapter"] == "windows":
             require(not observed.get("error"), observed.get("error", "Windows display helper error"))
             return {**info, "display": observed, "restoration": "managed"}
@@ -222,6 +239,8 @@ def prepare(record, host, persist):
         return virtual_display.prepare(record, host, persist)
     if host.display["adapter"] == "windows":
         return windows_display.prepare(record, host, persist)
+    if host.display["adapter"] == "mac-virtual":
+        return mac_virtual.prepare(record, host, persist)
     observed = host.probe(pairing=False)
     following = host.display.get("follow_main", host.display["adapter"] == "macos")
     desired = {"output": observed["identity"]["displayID"]}
@@ -298,6 +317,8 @@ def restore(record, host, persist, fields=("mode", "output")):
         return True  # Sunshine reverts the display itself when the session ends.
     if host.display["adapter"] == "windows":
         return windows_display.restore(record, host, persist)
+    if host.display["adapter"] == "mac-virtual":
+        return mac_virtual.restore(record, host, persist)
     journal = record.get("journal", {})
     if not journal:
         return True
