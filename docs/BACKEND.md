@@ -54,7 +54,9 @@ for the length of a session, so a Mac with its lid closed and no monitor still
 has a display for Sunshine. It needs `"platform": "macos"`, `ssh.user`, the
 screen's `tag_id`, and the mode to use. The tag is the `tagID (VirtualScreen)`
 value that `betterdisplaycli get -identifiers` prints for the screen. It is set
-in `computers.json` only. The manager keeps `tag_id` when saving a name
+in `computers.json` only. Mac adapters connect over SSH to `ssh.alias` when it
+is set, else to `host`; set the alias to an `ssh_config` host name to reuse its
+address and host key while Moonlight keeps using `host`. The manager keeps `tag_id` when saving a name
 change, but it does not list this adapter: choosing a display there replaces
 it, and editing the host, platform, or SSH settings there drops the mode, so
 that save is refused. Edit those in `computers.json`.
