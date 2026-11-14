@@ -1,7 +1,8 @@
 """Typed Mac display operations, sent to the user's approved SSH account.
 
 No persistent remote agent is installed. REQUEST is supplied by the client.
-Only the display mode and Sunshine output_name can be changed.
+Only the display mode, Sunshine output_name, and (for mac-virtual) the
+attachment and main role of one BetterDisplay virtual screen can be changed.
 """
 import json
 import ctypes
@@ -32,8 +33,8 @@ def manages_mode(display, observed):
     return display.get("adapter") != "macos" and (not display.get("follow_main") or observed["identity"]["UUID"].lower() == display["uuid"].lower())
 
 
-def run(argv):
-    p = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
+def run(argv, timeout=8):
+    p = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     if p.returncode or p.stdout.strip() == "Failed.":
         raise ValueError("display-operation-failed: check BetterDisplay, display connection and permissions")
     return p.stdout.strip()
@@ -50,8 +51,8 @@ def restart_sunshine():
     run(["/usr/bin/open", "/Applications/Sunshine.app"])
 
 
-def lid_closed():
-    result = run(["/usr/sbin/ioreg", "-r", "-k", "AppleClamshellState", "-d", "4"])
+def lid_closed(read=None):
+    result = (read or run)(["/usr/sbin/ioreg", "-r", "-k", "AppleClamshellState", "-d", "4"])
     match = re.search(r'"AppleClamshellState"\s*=\s*(Yes|No)', result)
     return match[1] == "Yes" if match else None
 
@@ -135,13 +136,262 @@ def list_displays():
     return {"betterdisplay": better, "displays": displays, "ac_power": "AC Power" in power, "lid_closed": lid_closed()}
 
 
-def display(request):
+def poll(read, ready, deadline, error):
+    """Repeat a read until it satisfies `ready` or the monotonic deadline passes.
+    BetterDisplay can reject a write issued just after a connect, then apply it."""
+    cause = None
+    while time.monotonic() < deadline:
+        try:
+            value = read()
+            if ready(value):
+                return value
+            cause = None  # A fresh answer replaces an earlier failure.
+        except ValueError as failure:
+            # Running out of time is a symptom; keep the failure that used it.
+            if cause is None or "out of time" not in str(failure):
+                cause = failure
+        time.sleep(.2)
+    raise ValueError(error + (" (" + str(cause) + ")" if cause else ""))
+
+
+OPERATION_SECONDS = 30  # Every operation, including each command, stays inside the client's 40-second SSH bound.
+PROBE_SECONDS = 3  # Every probe retries briefly; a full read measured about 0.5 s on a real Mac.
+PRECHECK_SECONDS = 2  # Detach's look before writing.
+FINAL_WRITE_SECONDS = 3  # Detach always gets this long to write, even past the budget. After a lock wait
+# near 40 s the client may time out first; the write still lands and restore is retried.
+HANDBACK_SECONDS = 5
+DETACH_RESERVE_SECONDS = 10  # Handing main back is optional; detaching is not.
+
+
+def sunshine_output():
+    config = Path.home() / ".config/sunshine/sunshine.conf"
+    outputs = re.findall(r"^\s*output_name\s*=\s*(.*?)\s*$", config.read_text(), re.M) if config.exists() else []
+    return outputs[-1] if outputs else None
+
+
+def virtual_screen(request, started=None):
+    """Session-scoped BetterDisplay virtual screen: probe, attach, detach.
+
+    The screen selected by tag_id belongs to streaming. Attach makes it the
+    main display and wakes it before Moonlight connects, because Sunshine
+    checks for an active display before it runs any app preparation. Detach
+    tries to return the main role to the recorded display, then writes the
+    disconnect (unless the screen already reads detached) and finishes only
+    once it reads as detached.
+    Sunshine must capture the main display (no output_name).
+    """
+    deadline = (started if started is not None else time.monotonic()) + OPERATION_SECONDS
+    # The current phase's limit: a phase shortens it; only detach's final write extends it.
+    limit = [deadline]
+    tag = request.get("tag_id")
+    if not isinstance(tag, str) or not re.fullmatch(r"\d{1,6}", tag):
+        raise ValueError("invalid virtual screen tag_id")
+    screen = ["-type=VirtualScreen", "-tagID=" + tag]
+    cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    cg.CGMainDisplayID.restype = ctypes.c_uint32
+    for name in ("CGDisplayIsActive", "CGDisplayIsAsleep"):
+        getattr(cg, name).restype, getattr(cg, name).argtypes = ctypes.c_uint32, [ctypes.c_uint32]
+
+    def command(argv):
+        # Bound every command by the operation's remaining time; a hung
+        # BetterDisplay is a failed read, never an escaped exception.
+        remaining = min(8, limit[0] - time.monotonic())
+        if remaining <= 0:
+            raise ValueError("display-operation-failed: out of time")
+        try:
+            return run(argv, timeout=remaining)
+        except subprocess.TimeoutExpired:
+            raise ValueError("display-operation-failed: " + Path(argv[0]).name + " did not answer") from None
+
+    def get(*args):
+        return command([BETTER, "get", *args])
+
+    def set_(*args):
+        command([BETTER, "set", *args])
+
+    def flag(value):
+        # The screen answers once per device it exposes ("on,on"). A mixed or
+        # unknown answer is not evidence either way.
+        tokens = {t.strip().lower() for t in value.split(",") if t.strip()}
+        if tokens and tokens <= {"on", "true", "1"}:
+            return True
+        if tokens and tokens <= {"off", "false", "0"}:
+            return False
+        raise ValueError("display-state-unknown: BetterDisplay gave an unclear answer")
+
+    def identifiers(*selector):
+        text = get(*selector, "-identifiers")
+        try:
+            value = json.loads(text)
+        except ValueError:
+            # Several matches arrive as comma-separated objects, for example
+            # a screen followed by BetterDisplay's default display group.
+            value = json.loads("[" + text + "]")
+        if isinstance(value, list):
+            unique = {(v.get("UUID"), str(v["displayID"])): v for v in value if isinstance(v, dict) and v.get("displayID")}
+            value = next(iter(unique.values())) if len(unique) == 1 else None
+        if not isinstance(value, dict) or not isinstance(value.get("UUID"), str) \
+                or not re.fullmatch(r"[A-Fa-f0-9-]{36}", value["UUID"]) or not re.fullmatch(r"\d+", str(value.get("displayID", ""))):
+            raise ValueError("display-missing: display has no unique identifier")
+        return value
+
+    def phase(seconds, step):
+        # Run `step` under a shorter limit, then restore the operation's.
+        limit[0] = min(deadline, time.monotonic() + seconds)
+        try:
+            return step()
+        finally:
+            limit[0] = deadline
+
+    def mode():
+        refresh = get(*screen, "-refreshRate").split(",")[0].strip()
+        return {"resolution": get(*screen, "-resolution").split(",")[0].strip(), "hidpi": flag(get(*screen, "-hiDPI")),
+                "refresh": refresh if refresh == "ProMotion" else float(refresh.removesuffix("Hz"))}
+
+    def connected():
+        return flag(get(*screen, "-connected"))
+
+    def state():
+        main_id = cg.CGMainDisplayID()
+        # The screen is read first and must succeed; it alone decides health.
+        virtual = {"connected": connected()}
+        if virtual["connected"]:
+            ids = identifiers(*screen)
+            did = int(ids["displayID"])
+            virtual.update(uuid=ids["UUID"].upper(), display_id=str(did), name=ids.get("name"),
+                           active=bool(cg.CGDisplayIsActive(did)), asleep=bool(cg.CGDisplayIsAsleep(did)),
+                           main=did == main_id, mode=mode())
+        main = {"uuid": None, "display_id": str(main_id), "name": None, "active": bool(cg.CGDisplayIsActive(main_id))}
+        if main["active"]:
+            try:
+                ids = identifiers("-displayID=" + str(main_id))
+                main.update(uuid=ids["UUID"].upper(), name=ids.get("name"))
+            except ValueError:
+                pass  # Unknown, not absent: prepare refuses to record it as a baseline.
+        # Context reads are best effort: only the screen itself decides health.
+        try:
+            lid = lid_closed(command)
+        except ValueError:
+            lid = None
+        try:
+            power = "AC Power" in command(["/usr/bin/pmset", "-g", "batt"])
+        except ValueError:
+            power = None
+        return {"virtual": virtual, "main": main, "sunshine_output": sunshine_output(),
+                "lid_closed": lid, "ac_power": power}
+
+    operation = request["operation"]
+    if operation == "probe":
+        return phase(PROBE_SECONDS, lambda: poll(state, bool, limit[0],
+                                                 "display-operation-failed: the virtual screen state could not be read"))
+    if operation == "attach":
+        wanted = request["mode"]
+        if not re.fullmatch(r"[0-9]{3,5}x[0-9]{3,5}", wanted.get("resolution", "")) or type(wanted.get("hidpi")) is not bool \
+                or type(wanted.get("refresh")) not in (int, float) or not 20 <= wanted["refresh"] <= 240:
+            raise ValueError("invalid display mode")
+        if sunshine_output():
+            raise ValueError("display-configuration-invalid: remove output_name from sunshine.conf so Sunshine captures the main display")
+        def attach():
+            if not connected():
+                set_(*screen, "-connected=on")
+            return connected()
+        poll(attach, bool, deadline, "virtual-display-attach-failed: BetterDisplay did not connect the screen")
+        def apply_mode():
+            if not same_setting("mode", mode(), wanted):
+                set_(*screen, "-resolution=" + wanted["resolution"], "-hiDPI=" + ("on" if wanted["hidpi"] else "off"),
+                     "-refreshRate=" + str(wanted["refresh"]) + "Hz")
+            return mode()
+        poll(apply_mode, lambda m: same_setting("mode", m, wanted), deadline,
+             "display-mode-unavailable: the virtual screen did not accept the mode")
+        def apply_main():
+            if not flag(get(*screen, "-main")):
+                set_(*screen, "-main=on")
+            return flag(get(*screen, "-main"))
+        poll(apply_main, bool, deadline, "virtual-display-main-failed: the virtual screen did not become the main display")
+        # Declare user activity: a slept display reports inactive, and Sunshine
+        # refuses to start a stream when no display is active.
+        try:
+            command(["/usr/bin/caffeinate", "-u", "-t", "1"])
+        except ValueError:
+            pass  # Readiness below is the check that matters.
+        def ready():
+            observed = state()
+            v = observed["virtual"]
+            return observed if v["connected"] and v["main"] and v["active"] and not v["asleep"] else None
+        return poll(ready, bool, deadline, "virtual-display-inactive: the virtual screen is attached but not awake")
+    if operation == "detach":
+        # Cleanup reads only what it needs: whether the screen is attached
+        # and, best effort, whether it is main. Unrelated reads cannot block it.
+        original = request.get("original_main")
+        if original is not None and not re.fullmatch(r"[A-Fa-f0-9-]{36}", original):
+            raise ValueError("invalid display UUID")
+        try:
+            if phase(PRECHECK_SECONDS, connected) is False:
+                return {"virtual": {"connected": False}, "main_restored": None}
+        except ValueError:
+            pass  # Unclear: treat as attached; detaching again is harmless.
+        restored = None
+        handback = min(HANDBACK_SECONDS, deadline - DETACH_RESERVE_SECONDS - time.monotonic())
+        if original and handback <= 0:
+            restored = False  # No time to spare: detach, and let macOS choose.
+        elif original:
+            # Hand the main role back first so macOS does not pick. A display
+            # that has gone, is asleep, refuses the role (a closed lid), or does
+            # not answer must not keep the screen attached; macOS then chooses.
+            def restore_main():
+                if not flag(get("-type=Display", "-UUID=" + original, "-main")):
+                    set_("-type=Display", "-UUID=" + original, "-main=on")
+                return flag(get("-type=Display", "-UUID=" + original, "-main"))
+            def hand_back():
+                if flag(get(*screen, "-main")):
+                    if not flag(get("-type=Display", "-UUID=" + original, "-connected")):
+                        raise ValueError("display-missing")
+                    poll(restore_main, bool, limit[0], "restore-main-failed")
+                    return True
+                return None
+            try:
+                restored = phase(handback, hand_back)
+            except ValueError:
+                restored = False
+        rejected = []
+        def detach():
+            # Write first: it is harmless when already detached, and reading
+            # first could spend the remaining time without ever writing.
+            try:
+                set_(*screen, "-connected=off")
+                rejected.clear()
+            except ValueError as failure:
+                rejected[:] = [failure]  # It can report failure for a write that lands.
+            if connected() is False:
+                return True
+            if rejected:
+                raise rejected[0]
+            return False
+        # A long lock wait must not cost the write itself: allow one short
+        # attempt past the budget.
+        final = max(deadline, time.monotonic() + FINAL_WRITE_SECONDS)
+        limit[0] = final
+        poll(detach, bool, final, "virtual-display-detach-failed: the screen is still connected")
+        return {"virtual": {"connected": False}, "main_restored": restored}
+    raise ValueError("unsupported virtual screen operation")
+
+
+STALE_ATTACH_SECONDS = 5
+
+
+def display(request, started=None):
     state = json.loads((Path.home() / ".config/sunshine/sunshine_state.json").read_text())
     identity = state.get("root", {}).get("uniqueid", "")
     if identity.lower() != request["pairing_uuid"].lower():
         raise ValueError("host-identity-mismatch: SSH host is not the paired Sunshine computer")
     if request["operation"] == "list":
         return list_displays()
+    if request.get("adapter") == "mac-virtual":
+        if request["operation"] == "attach" and started is not None and time.monotonic() - started > STALE_ATTACH_SECONDS:
+            # An attach that queued behind another operation may belong to a
+            # client that already gave up and restored; never attach late.
+            raise ValueError("attach-stale: the display was busy; connect again")
+        return virtual_screen(request, started)
     native = request.get("adapter") == "macos"
     if native:
         ids, native_mode, render_resolution = native_display()
@@ -251,8 +501,9 @@ if __name__ == "__main__":
         # discard its journal while an earlier write is still in flight.
         with (Path.home() / ".config/sunshine/hypertile-display.lock").open("a") as lock:
             os.fchmod(lock.fileno(), 0o600)
+            started = time.monotonic()
             fcntl.flock(lock, fcntl.LOCK_EX)
-            result = display(REQUEST)
+            result = display(REQUEST, started)
         print(json.dumps({"ok": True, "result": result}))
     except Exception as error:
         print(json.dumps({"ok": False, "error": str(error)}))

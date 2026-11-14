@@ -49,6 +49,42 @@ An `external` display profile leaves host display settings alone. The `macos`
 adapter follows the main Mac display without changing its mode; it requires an
 approved noninteractive SSH user. The optional `betterdisplay` adapter can
 manage a physical display's mode and requires its UUID and advertised mode.
+The `mac-virtual` adapter attaches one existing BetterDisplay virtual screen
+for the length of a session, so a Mac with its lid closed and no monitor still
+has a display for Sunshine. It needs `"platform": "macos"`, `ssh.user`, the
+screen's `tag_id`, and the mode to use. The tag is the `tagID (VirtualScreen)`
+value that `betterdisplaycli get -identifiers` prints for the screen. It is set
+in `computers.json` only. The manager keeps `tag_id` when saving a name
+change, but it does not list this adapter: choosing a display there replaces
+it, and editing the host, platform, or SSH settings there drops the mode, so
+that save is refused. Edit those in `computers.json`.
+
+```json
+"display": {"adapter": "mac-virtual", "tag_id": "7",
+            "mode": {"resolution": "1920x1080", "hidpi": true, "refresh": 60}}
+```
+
+Sunshine must capture the main display: leave `output_name` unset in
+`sunshine.conf`; the adapter refuses to start otherwise. Remove any Sunshine
+`prep-cmd` that attaches the same screen. Sunshine checks for an active display
+before it runs app preparation commands, so the screen is attached first.
+
+Before Moonlight starts, the adapter records the current main display, attaches
+the screen, sets its mode, makes it main, and wakes it. Health checks reconnect
+if the screen is lost or asleep. A check that cannot read the screen keeps the
+stream and looks again ten seconds later; after three such checks in a row it
+reconnects, and if the screen still cannot be read then, the session ends with
+the cause and restoring begins. A moved main display or changed mode is
+reported, not undone, until the next reconnect applies both again. Automatic
+reconnects keep the screen attached. Ending the session tries to make the
+recorded display main again, then detaches the screen, retrying every ten
+seconds until it reads as detached. If the recorded display is gone or refuses
+the role (a closed lid), macOS chooses. A screen already attached and main when
+a session starts is adopted, with no recorded display to return to. The screen
+belongs to streaming: do not use it for other work. If the client computer
+disappears mid-session, the screen stays attached until this daemon reaches the
+Mac again and finishes restoring it.
+
 The `windows` adapter uses an already-installed console-session recovery helper,
 an approved `ssh.alias`, and persistent `display.device_id`. These retain the
 configuration rules and recovery behavior from the extracted host adapters.
