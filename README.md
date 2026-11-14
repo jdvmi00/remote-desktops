@@ -121,13 +121,6 @@ Windows PowerShell display policy on its native runner. Integration tests use
 isolated fake clients and hosts; they do not establish real streaming performance.
 See [architecture](docs/ARCHITECTURE.md) and [source provenance](docs/PROVENANCE.md).
 Initial local measurements and their limits are in [validation](docs/VALIDATION.md).
-The [2026-09-07 audit](docs/AUDIT.md) records verified fixes, test results, and
-remaining limitations.
-
-## License
-
-MIT. This project is independently maintained and is not an official Omarchy,
-Moonlight, or Sunshine application.
 
 ## Graphical manager
 
@@ -138,6 +131,10 @@ connection controls, profile selection, and per-computer launchers, following
 the active Omarchy theme and desktop font. Closing it leaves connections
 running.
 
-See [UI build, preview, and interaction guide](docs/UI.md). Pairing and computer
-configuration still use Moonlight and the backend setup guide; no installable
+See [UI build, preview, and interaction guide](docs/UI.md). No installable
 release has been published.
+
+## License
+
+MIT. This project is independently maintained and is not an official Omarchy,
+Moonlight, or Sunshine application.

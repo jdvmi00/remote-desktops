@@ -11,16 +11,17 @@ cargo build --release --locked
 ```
 
 The application menu now contains **MacBook (Remote Desktop)**, using the
-configured Moonlight title without its ` - Moonlight` suffix. Repeat `install`
+computer's `name`, or its Moonlight title without the ` - Moonlight` suffix
+when no name is set. Repeat `install`
 for each configured computer. It creates
 `$XDG_DATA_HOME/applications/remote-desktops-COMPUTER.desktop`, defaulting to
 `~/.local/share/applications`. It never copies pairing certificates or creates
 workspace rules. Entries use the standard `computer` icon.
 
 The entry runs `remote-desktops open COMPUTER` with the absolute path of the
-binary that installed it. Keep this source checkout and release binary in place;
-rerun `launcher install` after moving the checkout. This is a development
-installation, not a portable package or a published Omarchy release.
+binary that installed it. Rerun `launcher install` after moving that binary.
+This is a development installation, not a portable package or a published
+Omarchy release.
 
 `open` selects the configured default profile, starts the daemon if needed,
 waits up to sixty seconds for a matched window, and focuses it. Reopening an
@@ -86,8 +87,8 @@ these two releases.
 - Entries intentionally omit `StartupWMClass`; it cannot promise separate
   Wayland taskbar grouping for clients that share Moonlight's app ID.
 
-The metadata is implemented; consuming it in generic Hypertile Scenes remains
-a separate feature. Class-only matching is insufficient for simultaneous hosts.
+Hypertile Scenes match a remote desktop on this class and title. Class-only
+matching is insufficient for simultaneous hosts.
 
 ## Initial window state
 
@@ -116,11 +117,13 @@ and left alone. The rule applies to every Moonlight window, not only managed one
 
 There is no ongoing fullscreen or placement correction. User fullscreen choices
 survive repeated opens, workspace changes, and daemon restart. Reconnect creates
-a new stream window with the saved windowed/fullscreen startup choice. A profile whose resolution is `auto` opens at the last known size and does not
+a new stream window with the saved windowed/fullscreen startup choice and
+returns it to the old window's workspace, and to its size and position when it
+was floating. A profile whose resolution is `auto` opens at the last known size and does not
 restart on its own; Refit restarts it once to match the current window. Existing windows adopted from
 the older backend are preserved; reconnect once to get their new startup tag.
 
 The startup action is consumed durably before dispatch to avoid replay after a
 crash. If initialization fails, status records an error and the user can leave
-fullscreen manually. No global Omarchy rule is edited, so independently launched
-Moonlight sessions keep their normal desktop policy.
+fullscreen manually. The optional rule above is the only change that reaches
+independently launched Moonlight sessions.

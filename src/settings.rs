@@ -344,9 +344,6 @@ async fn candidate(paths: &Paths, mut value: Value, draft: &Value) -> Result<Val
     if let Some(keys) = draft.get("system_keys") {
         computer["profiles"][profile]["system_keys"] = keys.clone();
     }
-    // Optional and defaulted, so a draft that omits it saves a valid boolean.
-    computer["profiles"][profile]["follow_window"] =
-        json!(draft["follow_window"].as_bool().unwrap_or(false));
     // SSH identity fields and the default profile's display recovery are
     // editable; drafts without them leave the saved values untouched.
     if let Some(ssh) = draft.get("ssh").and_then(Value::as_object) {
@@ -456,7 +453,9 @@ pub async fn run(paths: &Paths, action: &Action) -> Result<Value> {
                     })
                 }));
             }
-            Ok(json!({"revision":revision(&value),"candidates":found["candidates"]}))
+            Ok(
+                json!({"revision":revision(&value),"candidates":found["candidates"],"warnings":found["warnings"]}),
+            )
         }
         Action::Pair => {
             let request = read_stdin()?;

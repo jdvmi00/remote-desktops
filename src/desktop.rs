@@ -25,6 +25,11 @@ pub struct Window {
     /// Hyprland fullscreen mode: 0 none, 1 maximized, 2 fullscreen, 3 both.
     #[serde(default)]
     pub fullscreen: i64,
+    #[serde(default)]
+    pub floating: bool,
+    /// Top-left corner in the compositor's global layout coordinates.
+    #[serde(default)]
+    pub at: Vec<i64>,
     /// Floated by Omarchy's floating workspace mode at its generic size, not by
     /// the user or a rule of their own.
     #[serde(default)]
@@ -44,6 +49,39 @@ pub struct Monitor {
     /// The workspace currently shown on this monitor, part of the fit-memory key.
     pub active_workspace: i64,
 }
+/// Where a stream window was before its client restarted. A restart always
+/// opens a new window, on whichever workspace happens to be active.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Placement {
+    pub workspace: i64,
+    pub floating: bool,
+    /// Fullscreen or maximized: `at` and `size` then describe that state, not
+    /// the window's own geometry, and are not restored.
+    #[serde(default)]
+    pub fullscreen: i64,
+    pub at: Vec<i64>,
+    pub size: Vec<i64>,
+}
+impl Placement {
+    /// Whether `restore` gives the replacement this size and position. Only a
+    /// floating window on a numbered workspace has geometry of its own.
+    pub fn restores_geometry(&self) -> bool {
+        self.workspace > 0
+            && self.floating
+            && self.fullscreen == 0
+            && self.at.len() == 2
+            && matches!(self.size.as_slice(), &[width, height] if width >= 1 && height >= 1)
+    }
+    pub fn of(window: &Window) -> Self {
+        Self {
+            workspace: window.workspace,
+            floating: window.floating,
+            fullscreen: window.fullscreen,
+            at: window.at.clone(),
+            size: window.size.clone(),
+        }
+    }
+}
 /// Key under which a fitted window size is remembered: a new window lands on the
 /// focused monitor's active workspace, and the tile there is stable per layout.
 pub fn fit_key(monitor: &str, workspace: i64) -> String {
@@ -60,9 +98,87 @@ pub fn stream_class(class: &str) -> bool {
         CLASS | "com.moonlight_stream.Moonlight.desktop" | "moonlight" | "moonlight-qt"
     )
 }
+/// The Hyprland instance the observer last reached. The daemon outlives the
+/// shell that started it, and may be started from one with no compositor
+/// variables at all, so the start environment is only the first candidate.
+static INSTANCE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+fn instance() -> Option<String> {
+    INSTANCE
+        .lock()
+        .unwrap()
+        .clone()
+        .or_else(|| std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok())
+}
+/// The Wayland socket name of a Hyprland instance. Its lock file holds the
+/// compositor's PID, then that name.
+fn wayland_socket(root: &std::path::Path, instance: &str) -> Option<String> {
+    let text = std::fs::read_to_string(root.join(instance).join("hyprland.lock")).ok()?;
+    let name = text.lines().nth(1)?.trim().to_string();
+    (!name.is_empty() && !name.contains('/')).then_some(name)
+}
+/// Connect to a live Hyprland event socket: the start environment's instance
+/// first, then the instance behind the environment's Wayland display, then
+/// the others oldest first (the login session, ahead of a nested or test
+/// compositor started later). A socket file left behind by an instance that
+/// has exited refuses the connection.
+async fn attach() -> Option<UnixStream> {
+    let root = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?).join("hypr");
+    let mut candidates: Vec<String> = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
+        .into_iter()
+        .collect();
+    let display = std::env::var("WAYLAND_DISPLAY").ok();
+    let mut others: Vec<(bool, std::time::SystemTime, String)> = std::fs::read_dir(&root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            // The lock is written once, when the instance starts. The
+            // directory's own time moves whenever a socket is added to it.
+            let modified = std::fs::metadata(entry.path().join("hyprland.lock"))
+                .or_else(|_| entry.metadata())
+                .ok()?
+                .modified()
+                .ok()?;
+            let elsewhere = display.is_none() || wayland_socket(&root, &name) != display;
+            (!candidates.contains(&name)).then_some((elsewhere, modified, name))
+        })
+        .collect();
+    others.sort();
+    candidates.extend(others.into_iter().map(|(_, _, name)| name));
+    for name in candidates {
+        if let Ok(stream) = UnixStream::connect(root.join(&name).join(".socket2.sock")).await {
+            *INSTANCE.lock().unwrap() = Some(name);
+            return Some(stream);
+        }
+    }
+    None
+}
+/// Display variables for a client when the attached instance is not the one in
+/// the daemon's own environment. The client must open its window on the
+/// compositor the daemon watches, or it could never be adopted.
+pub fn client_environment() -> Vec<(&'static str, String)> {
+    let Some(attached) = INSTANCE.lock().unwrap().clone() else {
+        return Vec::new();
+    };
+    // The start environment already describes this instance.
+    if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok().as_deref() == Some(attached.as_str())
+        && std::env::var_os("WAYLAND_DISPLAY").is_some()
+    {
+        return Vec::new();
+    }
+    let mut variables = Vec::new();
+    let socket = std::env::var_os("XDG_RUNTIME_DIR")
+        .and_then(|runtime| wayland_socket(&PathBuf::from(runtime).join("hypr"), &attached));
+    if let Some(socket) = socket {
+        variables.push(("WAYLAND_DISPLAY", socket));
+    }
+    variables.push(("HYPRLAND_INSTANCE_SIGNATURE", attached));
+    variables
+}
 fn command() -> Command {
     let mut cmd = Command::new("hyprctl");
-    if let Ok(instance) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
+    if let Some(instance) = instance() {
         cmd.args(["-i", &instance]);
     }
     cmd.stdin(Stdio::null())
@@ -95,6 +211,8 @@ async fn snapshot() -> Result<Vec<Window>> {
                 monitor: w["monitor"].as_i64().unwrap_or(-1),
                 workspace: w["workspace"]["id"].as_i64().unwrap_or(-1),
                 fullscreen: w["fullscreen"].as_i64().unwrap_or(0),
+                floating: w["floating"] == true,
+                at: serde_json::from_value(w["at"].clone()).unwrap_or_default(),
                 mode_floated: w["floating"] == true
                     && w["tags"].as_array().is_some_and(|tags| {
                         tags.iter()
@@ -104,6 +222,14 @@ async fn snapshot() -> Result<Vec<Window>> {
             })
         })
         .collect())
+}
+/// The window as the compositor reports it now. Hyprland sends no event for a
+/// resize, so the observed list can hold an old size; anything that measures
+/// the window asks again. `None` when that same window no longer exists.
+pub async fn current(window: &Window) -> Result<Option<Window>> {
+    Ok(snapshot().await?.into_iter().find(|w| {
+        w.address == window.address && w.pid == window.pid && w.stable_id == window.stable_id
+    }))
 }
 /// Run hyprctl and return its text output.
 pub async fn control(args: &[&str]) -> Result<String> {
@@ -207,9 +333,8 @@ pub fn floating_size(stream: &str, monitor: &Monitor) -> Option<(i64, i64)> {
     let size = ((w * factor).round() as i64, (h * factor).round() as i64);
     (size.0 >= 120 && size.1 >= 120).then_some(size)
 }
-/// The size to launch a fit stream at: the exact size last fitted for this
-/// monitor and workspace, or the monitor's full size as a first guess that the
-/// one-time correction then trims to the real window. Returns the memory key.
+/// The size to launch a fit stream at: the size last refitted for the focused
+/// monitor and its active workspace, or `initial`. Returns the memory key.
 pub async fn predict(
     learned: &BTreeMap<String, String>,
     initial: &str,
@@ -222,28 +347,54 @@ pub async fn predict(
     }
     Ok((key, initial.to_string()))
 }
+static OBSERVED: std::sync::OnceLock<watch::Sender<Vec<Window>>> = std::sync::OnceLock::new();
+/// Take one snapshot and publish it. Every publisher goes through here one at
+/// a time, so an older snapshot can never replace a newer one. `closed` is the
+/// event socket closing: windows of an instance that is gone must not stay
+/// listed as live, so a failed snapshot then publishes an empty list.
+async fn publish(tx: &watch::Sender<Vec<Window>>, closed: bool) -> Result<()> {
+    static PUBLISHING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _order = PUBLISHING.lock().await;
+    let windows = match snapshot().await {
+        Ok(windows) => windows,
+        Err(_) if closed => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    tx.send_if_modified(|old| {
+        let changed = *old != windows;
+        *old = windows;
+        changed
+    });
+    Ok(())
+}
+/// Publish the windows as they are now. Hyprland reports no event for a
+/// resize, a move within a workspace, or a float change the daemon made
+/// itself, so the daemon asks again after it arranges a window.
+pub async fn refresh() {
+    if let Some(tx) = OBSERVED.get() {
+        let _ = publish(tx, false).await;
+    }
+}
 pub async fn observe() -> Result<watch::Receiver<Vec<Window>>> {
     let (tx, rx) = watch::channel(Vec::new());
-    let Some(instance) = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE") else {
-        return Ok(rx);
-    };
-    let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") else {
-        return Ok(rx);
-    };
-    let socket = PathBuf::from(runtime)
-        .join("hypr")
-        .join(instance)
-        .join(".socket2.sock");
+    let _ = OBSERVED.set(tx.clone());
     // Existing windows must be known before accepting connect requests.
-    tx.send_replace(snapshot().await?);
+    let mut attached = attach().await;
+    if attached.is_some() {
+        publish(&tx, false).await?;
+    }
     tokio::spawn(async move {
         loop {
-            if let Ok(stream) = UnixStream::connect(&socket).await {
+            // Reattach on every pass: Hyprland may have restarted under a new
+            // instance, or started after this daemon did.
+            let stream = match attached.take() {
+                Some(stream) => Some(stream),
+                None => attach().await,
+            };
+            if let Some(stream) = stream {
                 // Subscribe before reading to avoid missing a window opened
                 // between the initial snapshot and event subscription.
-                if let Ok(windows) = snapshot().await {
-                    tx.send_replace(windows);
-                }
+                let _ = publish(&tx, false).await;
                 let mut lines = BufReader::new(stream).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     let event = line.split(">>").next().unwrap_or("");
@@ -275,21 +426,11 @@ pub async fn observe() -> Result<watch::Receiver<Vec<Window>>> {
                                 break;
                             }
                         }
-                        if let Ok(windows) = snapshot().await {
-                            tx.send_if_modified(|old| {
-                                if *old == windows {
-                                    false
-                                } else {
-                                    *old = windows;
-                                    true
-                                }
-                            });
-                        }
+                        refresh().await;
                     }
                 }
-            }
-            if let Ok(windows) = snapshot().await {
-                tx.send_replace(windows);
+                // The event socket closed.
+                let _ = publish(&tx, true).await;
             }
             tokio::time::sleep(Duration::from_secs(15)).await;
         }
@@ -321,18 +462,67 @@ pub async fn action(window: &Window, action: &str) -> Result<()> {
         "uninhibit" => {
             "hl.dsp.window.set_prop({window='address:'..w.address,prop='idle_inhibit',value='none'})"
         }
-        action if action.starts_with("workspace:") => {
-            // Return the window to the workspace it was on before a refit restart.
-            let id: i64 = action[10..].parse().context("invalid workspace id")?;
-            return dispatch_checked(
-                window,
-                &format!("hl.dsp.window.move({{window='address:'..w.address,workspace={id},follow=false}})"),
-            )
-            .await;
-        }
         _ => bail!("unsupported window action"),
     };
     dispatch_checked(window, dispatch).await
+}
+/// Put a restarted stream's new window back where the old one was: its
+/// workspace, and for a floating window its size and position. A tiled window's
+/// slot belongs to the layout and is not forced.
+pub async fn restore(window: &Window, placement: &Placement) -> Result<()> {
+    // Numbered workspaces only. A window that was on a special workspace
+    // (Omarchy's minimize parks it on one) has no numeric target, and its
+    // geometry there says nothing about where its replacement belongs.
+    if placement.workspace <= 0 {
+        return Ok(());
+    }
+    if window.workspace != placement.workspace {
+        dispatch_checked(
+            window,
+            &format!(
+                "hl.dsp.window.move({{window='address:'..w.address,workspace={},follow=false}})",
+                placement.workspace
+            ),
+        )
+        .await?;
+    }
+    if !placement.restores_geometry() {
+        return Ok(());
+    }
+    let (&[x, y], &[width, height]) = (placement.at.as_slice(), placement.size.as_slice()) else {
+        return Ok(());
+    };
+    // Startup may just have taken the window out of fullscreen, and the move
+    // may have brought it onto a floating workspace. Omarchy's workspace mode
+    // and Hypertile answer both by floating and sizing the window on short
+    // timers (1 ms and 20 ms). Let them finish, or they undo the restore; then
+    // ask the compositor, not the earlier snapshot.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let Some(now) = current(window).await? else {
+        bail!("window identity changed");
+    };
+    if now.fullscreen != 0 {
+        return Ok(());
+    }
+    if !now.floating {
+        dispatch_checked(
+            window,
+            "hl.dsp.window.float({window='address:'..w.address,action='on'})",
+        )
+        .await?;
+    }
+    dispatch_checked(window, &format!("hl.dsp.window.resize({{window='address:'..w.address,x={width},y={height},relative=false}})")).await?;
+    dispatch_checked(
+        window,
+        &format!("hl.dsp.window.move({{window='address:'..w.address,x={x},y={y},relative=false}})"),
+    )
+    .await?;
+    if now.mode_floated {
+        // As at first launch: a window the workspace mode floated keeps its
+        // shape while an edge is dragged.
+        dispatch_checked(window, "hl.dsp.window.set_prop({window='address:'..w.address,prop='keep_aspect_ratio',value='1'})").await?;
+    }
+    Ok(())
 }
 pub fn identity_lost(error: &anyhow::Error) -> bool {
     error.to_string().contains("window identity changed")

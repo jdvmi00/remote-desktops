@@ -6,8 +6,10 @@ local function install(prefix, timeout)
   local hint, deadline, release_timer, escape, trigger
   local modifiers = { [37]=true, [50]=true, [62]=true, [64]=true,
                       [105]=true, [108]=true, [133]=true, [134]=true }
+  -- The daemon tags only the stream windows it owns, whichever class Moonlight's
+  -- SDL surface ends up with. The tag is the contract, not the class.
   local function tagged(w)
-    if not w or w.class ~= "com.moonlight_stream.Moonlight" then return false end
+    if not w then return false end
     for _, t in ipairs(w.tags or {}) do
       if t ~= tag and t:match("^remote%-desktops%-") then return true end
     end
@@ -27,7 +29,7 @@ local function install(prefix, timeout)
   end
   -- Remove a transient tag left by a previous configuration reload.
   for _, w in ipairs(hl.get_windows()) do mark(w, false) end
-  hl.window_rule({match={class="com.moonlight_stream.Moonlight", tag=tag}, no_shortcuts_inhibit=true})
+  hl.window_rule({match={tag=tag}, no_shortcuts_inhibit=true})
   deadline = hl.timer(finish, {timeout=timeout * 1000, type="repeat"})
   deadline:set_enabled(false)
   -- Keyboard events precede normal binding dispatch. Defer cleanup until the

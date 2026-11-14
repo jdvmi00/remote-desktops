@@ -61,12 +61,20 @@ pub struct Session {
     /// Concrete stream size for this launch when the profile fits the window.
     #[serde(default)]
     pub resolution: Option<String>,
-    /// Window sizes last observed per monitor; the prediction for the next launch.
+    /// Stream sizes set by Refit, per monitor and workspace; the next launch
+    /// there starts at that size.
     #[serde(default)]
     pub learned: BTreeMap<String, String>,
-    /// Workspace to return the window to after a refit restart moved it.
+    /// Where the window was before a restart replaced it; applied once to the
+    /// window that takes its place.
     #[serde(default)]
-    pub refit_workspace: Option<i64>,
+    pub placement: Option<desktop::Placement>,
+    /// This launch's capture display was verified at least once.
+    #[serde(default)]
+    pub display_verified: bool,
+    /// `window` was recorded by this daemon process, not read from disk.
+    #[serde(skip)]
+    pub window_seen: bool,
 }
 impl Session {
     fn new(computer: &str, profile: &str, config: Value, settings: Value) -> Self {
@@ -95,12 +103,17 @@ impl Session {
             evidence: json!({}),
             resolution: None,
             learned: BTreeMap::new(),
-            refit_workspace: None,
+            placement: None,
+            display_verified: false,
+            window_seen: false,
         }
     }
+    /// Whether Refit sizes this stream. A full-monitor profile always launches
+    /// at the monitor's resolution, so a refitted size could never take effect.
     fn fits_window(&self) -> bool {
-        self.settings["stream_resolution"] == "auto"
-            || self.settings["display"]["adapter"] == "sunshine"
+        self.settings["stream_resolution"] != "monitor"
+            && (self.settings["stream_resolution"] == "auto"
+                || self.settings["display"]["adapter"] == "sunshine")
     }
 }
 /// First sighting of a stream window. Moonlight 6.2 recreates the Wayland
@@ -258,7 +271,6 @@ impl Manager {
             "resolved":recovery["resolved"],"launcher":crate::launcher::identity(&r.computer,&r.config),
             "client_version":r.client_version,"launched_at":r.launched_at,"attempts":r.attempts,"next_retry":r.next_retry,
             "refit_available":refit_available,
-            "refit_reason":if refit_available { "" } else { "Choose Sunshine matching, or verify the host when using verified matching." },
             "host_display":if verified { observed.clone() } else { json!({"verified":false}) },
             "fit_window":r.fits_window(),"resolution":r.resolution.clone().or_else(|| r.settings["stream_resolution"].as_str().map(String::from))})
     }
@@ -304,7 +316,12 @@ impl Manager {
             if self.public(&r)["refit_available"] != true {
                 bail!("refit-unavailable: host display matching has not been verified");
             }
-            let window = r.window.clone().context("no window to fit yet")?;
+            // Measure the window as it is now, not as it was at the last event.
+            let seen = r.window.clone().context("no window to fit yet")?;
+            let window = desktop::current(&seen)
+                .await
+                .context("fit-unavailable: fitting the window needs Hyprland")?
+                .context("the window closed before it could be measured")?;
             let monitors = desktop::monitors()
                 .await
                 .context("fit-unavailable: fitting the window needs Hyprland")?;
@@ -323,7 +340,6 @@ impl Manager {
                 );
                 r.reconnect = true;
                 r.phase = "reconnecting".into();
-                r.refit_workspace = Some(window.workspace);
             })
             .await?;
             eprintln!("{target}: refitting the stream to {observed}");
@@ -420,10 +436,28 @@ impl Manager {
                     bail!("paired computer already owned by {other}");
                 }
             }
+            // Every launch of the settled session left a job record; none of
+            // them has a live owner once it is idle.
+            for entry in std::fs::read_dir(&directory)?.flatten() {
+                let file = entry.file_name();
+                let file = file.to_string_lossy();
+                if file.starts_with("job-") && (file.ends_with(".json") || file.ends_with(".lock"))
+                {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
             let mut record = Session::new(name, &profile, config, settings);
             record.generation = sessions.get(name).map_or(1, |r| r.generation + 1);
+            // A remembered fit belongs to the sizing it was made under. After
+            // the resolution or host display matching is edited, the saved
+            // resolution decides the next launch.
             record.learned = sessions
                 .get(name)
+                .filter(|r| {
+                    r.profile == record.profile
+                        && r.settings["stream_resolution"] == record.settings["stream_resolution"]
+                        && r.settings["display"] == record.settings["display"]
+                })
                 .map(|r| r.learned.clone())
                 .unwrap_or_default();
             // Recovery baseline precedes launch intent. Never overwrite a
@@ -464,6 +498,11 @@ impl Manager {
             })
             .await?;
         } else if action == "disconnect" || action == "restore" {
+            if action == "restore" && old.desired {
+                bail!(
+                    "restore retries host display recovery after a session ends; disconnect this computer first"
+                );
+            }
             self.update(name, |r| {
                 r.desired = false;
                 r.reconnect = false;
@@ -516,14 +555,14 @@ impl Manager {
     }
     async fn worker(self: Arc<Self>, name: String, mut wake: watch::Receiver<u64>) {
         let mut windows = self.windows.clone();
-        let mut health_due = 0;
+        let (mut health_due, mut geometry_due) = (0, 0);
         loop {
             // A forgotten session drops its wake sender; stop before touching
             // any record a later connect may create under the same name.
             if wake.has_changed().is_err() {
                 return;
             }
-            let result = self.step(&name, &mut health_due).await;
+            let result = self.step(&name, &mut health_due, &mut geometry_due).await;
             if wake.has_changed().is_err() {
                 return;
             }
@@ -565,7 +604,12 @@ impl Manager {
             }
         }
     }
-    async fn step(&self, name: &str, health_due: &mut u64) -> Result<Duration> {
+    async fn step(
+        &self,
+        name: &str,
+        health_due: &mut u64,
+        geometry_due: &mut u64,
+    ) -> Result<Duration> {
         let directory = self.paths.session(name);
         let recovery = directory.join("recovery.json");
         let mut r = self.get(name)?;
@@ -575,7 +619,25 @@ impl Manager {
             if alive {
                 let closing = r.closing_at.unwrap_or_else(now);
                 if r.closing_at.is_none() {
-                    self.update(name, |r| r.closing_at = Some(closing)).await?;
+                    // A restart reopens the window wherever focus is. Record
+                    // where this one is now so its replacement can go back.
+                    let placement = match &r.window {
+                        Some(window) if r.desired => Some(desktop::Placement::of(
+                            &desktop::current(window)
+                                .await
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| window.clone()),
+                        )),
+                        _ => None,
+                    };
+                    self.update(name, |r| {
+                        r.closing_at = Some(closing);
+                        if placement.is_some() {
+                            r.placement = placement;
+                        }
+                    })
+                    .await?;
                     if let Some(window) = &r.window {
                         let _ = desktop::action(window, "close").await;
                     }
@@ -733,6 +795,7 @@ impl Manager {
                         .unwrap_or("unknown")
                         .into();
                     r.token = Some(uuid::Uuid::new_v4().simple().to_string());
+                    r.display_verified = false;
                     r.phase = "connecting".into();
                     r.launched_at = now();
                     r.error = None;
@@ -747,6 +810,7 @@ impl Manager {
                 .arg("--runtime")
                 .arg(&self.paths.runtime)
                 .env(supervisor::TOKEN, r.token.as_ref().unwrap())
+                .envs(desktop::client_environment())
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
@@ -762,7 +826,11 @@ impl Manager {
             if job.evidence["terminated"] == -100 && r.attempts < 3 {
                 self.update(name, |r| {
                     r.token = None;
-                    r.window = None;
+                    // The client dropped on its own; its last seen window is
+                    // where the retry belongs.
+                    if let Some(window) = r.window.take() {
+                        r.placement = Some(desktop::Placement::of(&window));
+                    }
                     r.attempts += 1;
                     r.next_retry = now() + [2, 5, 15][(r.attempts - 1) as usize];
                     r.phase = "preflight".into();
@@ -773,16 +841,34 @@ impl Manager {
                     r.desired = false;
                     r.phase = "stopping".into();
                     r.evidence = job.evidence.clone();
-                    if !(job.success || job.evidence["quit"] == true) {
-                        r.error = Some("stream-exited: reconnect after recovery".into());
-                    }
+                    // A clean quit ends in idle: a note raised while the
+                    // stream ran (an unreachable host, lapsed verification)
+                    // is not a failed connection.
+                    r.error = if job.success || job.evidence["quit"] == true {
+                        None
+                    } else {
+                        Some("stream-exited: reconnect after recovery".into())
+                    };
                 })
                 .await?;
             }
             return Ok(Duration::ZERO);
         }
         if alive {
-            let window = self
+            // Hyprland reports no event when a floating window is dragged or
+            // resized. Look again every ten seconds, so a stream that drops on
+            // its own still returns to where the user left it.
+            if *geometry_due <= now()
+                && self
+                    .windows
+                    .borrow()
+                    .iter()
+                    .any(|w| Some(w.pid) == job.pid && w.floating)
+            {
+                *geometry_due = now() + 10;
+                desktop::refresh().await;
+            }
+            let mut window = self
                 .windows
                 .borrow()
                 .iter()
@@ -793,6 +879,7 @@ impl Manager {
                 })
                 .cloned();
             let mut rejected_rule = None;
+            let mut arranged = false;
             if let Some(w) = &window {
                 let key = format!("{}:{}:{}", job.token, w.pid, w.stable_id);
                 if r.initialized_window.as_ref() != Some(&key) {
@@ -806,8 +893,27 @@ impl Manager {
                     }
                     // Consume startup policy durably before dispatch: a crash
                     // must not cause a restart to undo a later user choice.
+                    // A new surface of the same launch takes the place of the
+                    // window recorded before it, even when its arrival and
+                    // the old one's close were seen in a single snapshot.
+                    // Only a window this daemon process saw counts: one
+                    // recorded before a daemon restart may have been moved
+                    // since, and the surface found now is where it belongs.
+                    let replaced = r
+                        .window
+                        .as_ref()
+                        .filter(|old| {
+                            r.window_seen
+                                && (old.stable_id != w.stable_id || old.address != w.address)
+                        })
+                        .map(desktop::Placement::of);
                     r = self
-                        .update(name, |r| r.initialized_window = Some(key))
+                        .update(name, |r| {
+                            r.initialized_window = Some(key);
+                            if r.placement.is_none() {
+                                r.placement = replaced;
+                            }
+                        })
                         .await?;
                     // Moonlight's own --display-mode fullscreen already asks
                     // the compositor. A second fullscreen_state while SDL is
@@ -826,7 +932,13 @@ impl Manager {
                     // so a status read can observe the failure too early.
                     // Omarchy's floating mode opens every window at one generic
                     // size. Give this one the stream's shape instead, once.
-                    let float_size = if !wants_fullscreen && w.mode_floated {
+                    // A restart that restores the old window's own size skips
+                    // this; see the placement below.
+                    let restoring = r
+                        .placement
+                        .as_ref()
+                        .is_some_and(desktop::Placement::restores_geometry);
+                    let float_size = if !wants_fullscreen && w.mode_floated && !restoring {
                         let stream = r
                             .resolution
                             .clone()
@@ -863,14 +975,52 @@ impl Manager {
                             }
                         }
                     }
-                    // A refit restart may reopen the window on the active
-                    // workspace; return it to where the user had put it.
-                    if let Some(ws) = r.refit_workspace {
-                        if w.workspace != ws {
-                            let _ = desktop::action(w, &format!("workspace:{ws}")).await;
+                    // A restarted client's window opens wherever focus is; put
+                    // it back where the one it replaces was. Best effort: the
+                    // stream stays usable wherever the window ends up.
+                    if let Some(placement) = r.placement.clone() {
+                        match desktop::restore(w, &placement).await {
+                            Err(error) if desktop::identity_lost(&error) => {
+                                // The surface was replaced mid-restore. Keep
+                                // the placement for the window that replaced it.
+                                self.update(name, |r| r.initialized_window = None).await?;
+                                return Ok(Duration::from_millis(100));
+                            }
+                            Err(error) => {
+                                eprintln!("{name}: window placement was not restored: {error:#}");
+                            }
+                            Ok(()) => {}
                         }
-                        r = self.update(name, |r| r.refit_workspace = None).await?;
                     }
+                    arranged = true;
+                }
+            }
+            // Startup may have resized, moved, or floated the window, and
+            // Hyprland reports none of that as an event. Record the result, so
+            // a later restart returns the window to where it really is.
+            if arranged && let Some(seen) = window.clone() {
+                desktop::refresh().await;
+                let fresh = self
+                    .windows
+                    .borrow()
+                    .iter()
+                    .find(|w| {
+                        w.address == seen.address
+                            && w.pid == seen.pid
+                            && w.stable_id == seen.stable_id
+                    })
+                    .cloned();
+                if fresh.is_none() {
+                    // The surface was replaced as it was being arranged. The
+                    // placement is still owed to the window that replaced it.
+                    self.startup.lock().unwrap().remove(name);
+                    self.update(name, |r| r.initialized_window = None).await?;
+                    return Ok(Duration::from_millis(100));
+                }
+                window = fresh;
+                // The window that received the placement is still there.
+                if r.placement.is_some() {
+                    r = self.update(name, |r| r.placement = None).await?;
                 }
             }
             let changed_visibility = window.as_ref().map(|w| (&w.stable_id, w.pid, w.visible))
@@ -880,11 +1030,11 @@ impl Manager {
                 let inhibit = policy == "always" || (policy == "visible" && w.visible);
                 let _ = desktop::action(w, if inhibit { "inhibit" } else { "uninhibit" }).await;
             }
-            // Observed geometry is never fed back into placement. It only sizes
-            // the stream, once, for profiles that fit the window. A rejected
-            // startup rule is part of this same write so phase cannot lag it.
+            // A rejected startup rule is part of this same write so phase
+            // cannot lag it.
             if rejected_rule.is_some()
                 || window != r.window
+                || (window.is_some() && !r.window_seen)
                 || r.evidence != job.evidence
                 || r.phase == "connecting"
             {
@@ -893,7 +1043,22 @@ impl Manager {
                         if let Some(message) = rejected_rule.clone() {
                             r.error = Some(message);
                         }
+                        // The window went away while the client lives (it is
+                        // exiting, or recreating its surface): remember where
+                        // it was for whatever replaces it.
+                        // A placement still waiting for a replacement
+                        // outranks the window that failed to receive it.
+                        match (&window, &r.window) {
+                            (None, Some(lost)) if r.placement.is_none() && r.window_seen => {
+                                r.placement = Some(desktop::Placement::of(lost));
+                            }
+                            // The same window is back (it was only hidden);
+                            // nothing replaced it.
+                            (Some(_), _) => r.placement = None,
+                            _ => {}
+                        }
                         r.window = window;
+                        r.window_seen = r.window.is_some();
                         r.evidence = job.evidence.clone();
                         r.phase = if r.window.is_some() {
                             "window-ready"
@@ -923,7 +1088,11 @@ impl Manager {
                         return Ok(Duration::ZERO);
                     }
                     Ok(value) => {
+                        let verified = storage::read::<Value>(&recovery).is_ok_and(|record| {
+                            record["resolved"]["host_display"]["verified"] == true
+                        });
                         self.update(name, |r| {
+                            r.display_verified |= verified;
                             r.error = if value["degraded"] == true {
                                 Some("display-mode-changed: host settings preserved".into())
                             } else {
@@ -932,9 +1101,15 @@ impl Manager {
                         })
                         .await?;
                     }
+                    // None of these mean the stream is broken. Once this
+                    // launch's capture display has been verified, losing sight
+                    // of Sunshine's log only withdraws Refit until a reconnect.
+                    // A launch that never verified still fails closed.
                     Err(e)
                         if (e.to_string().contains("host-unreachable")
-                            || e.to_string().contains("TimeoutExpired")) =>
+                            || e.to_string().contains("TimeoutExpired")
+                            || (r.display_verified
+                                && e.to_string().contains("display-verification-lost"))) =>
                     {
                         self.update(name, |r| r.error = Some(e.to_string())).await?;
                     }
@@ -1110,7 +1285,7 @@ async fn handle(stream: UnixStream, manager: Arc<Manager>) -> Result<()> {
 pub async fn request(paths: &Paths, payload: &Value) -> Result<Value> {
     let mut stream = UnixStream::connect(paths.socket())
         .await
-        .context("daemon unavailable; start remote-desktops daemon")?;
+        .context("the Remote Desktops service is not running; `remote-desktops start` starts it")?;
     stream.write_all(&serde_json::to_vec(payload)?).await?;
     stream.write_all(b"\n").await?;
     let mut text = String::new();

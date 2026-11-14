@@ -74,11 +74,44 @@ Moonlight launches in the profile’s `display_mode` (`windowed` by default, or
 full physical pixel dimensions at launch, accounting for rotation without
 subtracting bars or gaps. It requires Hyprland; fixed sizes remain available
 without it. This choice does not configure the remote display by itself. The controller never creates workspace
-rules, reserves tiles, sets window positions/sizes, or repairs a user's placement. Window
+rules or reserves tiles, and it does not correct a live window's placement. Window
 creation, title, visibility, and movement are observed through Hyprland events;
-event bursts are coalesced before a snapshot query. Visibility can update idle
-inhibition on the owned window. Explicit focus/reconnect/disconnect can focus
-or close an owned window, but reconciliation never moves it.
+event bursts are coalesced before a snapshot query. Hyprland sends no event for
+a resize or a drag, so anything that measures a window queries it again first,
+and a floating stream window is looked at again every ten seconds. Visibility
+can update idle inhibition on the owned window. Explicit
+focus/reconnect/disconnect can focus or close an owned window.
+
+A restart is the one time the controller places a window. Refit, Reconnect, a
+host health reconnect, and the automatic retry after a dropped stream all end
+one Moonlight process and start another, and the new window opens on whichever
+workspace is active. The controller records the old window's workspace,
+floating state, size, and position before it closes (or as last seen, at most
+ten seconds earlier, when the client dropped on its own) and applies them once to the replacement: it moves
+the window back to a numbered workspace and, for a floating window that was
+not fullscreen or maximized, restores its size and position after Omarchy's
+and Hypertile's own floating-workspace handlers have run. A window that was on
+a special workspace, such as one Omarchy minimized, is left where it opens. A
+tiled window's slot belongs to the layout and is not forced. A placement owner that pins windows by identity, such as a Hypertile
+Scene, sees the replacement as a new window.
+
+A surface Moonlight recreates within one launch takes the old surface's place
+the same way, but only when the running daemon saw the old one itself. A
+restarted daemon does not infer a placement from the window recorded before it
+stopped, because that position may be out of date. Three cases still act on
+older information: a placement that was already pending when the daemon
+stopped is applied; a Reconnect sent before the restarted daemon has looked at
+the window uses the recorded one; and a mode-floated surface adopted after a
+restart gets the stream's shape as on a first launch.
+
+The daemon attaches to the running Hyprland instance through its event socket
+under `$XDG_RUNTIME_DIR/hypr`: the instance named in its start environment
+first, then the one behind its environment's Wayland display, then any other
+live instance of the user, oldest first. It reattaches after Hyprland
+restarts, and works when the first command came from a shell without the
+compositor variables. When the attached instance is not the one in the start
+environment, Moonlight is launched with that instance's Wayland display and
+signature, so the stream opens on the compositor being watched.
 
 Each new matched stream window receives a stable per-computer tag and one
 application of the saved window/fullscreen choice to counter startup rules.
@@ -180,7 +213,8 @@ Draft JSON arrives on bounded stdin, not shell arguments. The Python boundary
 reads Moonlight's paired-host metadata, validates the full candidate config,
 and performs the existing authenticated app-list probe with an external display
 adapter. No setup operation prepares a host, writes recovery, starts the daemon,
-or launches a streaming client. Certificates and SSH details are not sent to Qt.
+or launches a streaming client. Certificates are not sent to Qt. The editable SSH user, alias, and control
+path are.
 
 A save merges only explicitly editable fields into the latest configuration:
 name, address, platform, the default profile's stream settings and display
