@@ -827,15 +827,7 @@ impl Manager {
                     // Omarchy's floating mode opens every window at one generic
                     // size. Give this one the stream's shape instead, once.
                     let float_size = if !wants_fullscreen && w.mode_floated {
-                        let stream = r
-                            .resolution
-                            .clone()
-                            .or_else(|| r.settings["stream_resolution"].as_str().map(String::from))
-                            .unwrap_or_default();
-                        desktop::monitors().await.ok().and_then(|monitors| {
-                            let monitor = monitors.iter().find(|m| m.id == w.monitor)?;
-                            desktop::floating_size(&stream, monitor)
-                        })
+                        stream_shape(&r, w).await
                     } else {
                         None
                     };
@@ -871,6 +863,24 @@ impl Manager {
                         }
                         r = self.update(name, |r| r.refit_workspace = None).await?;
                     }
+                }
+            }
+            // The mode floats the window at its generic size again whenever it
+            // is carried back into a floating workspace, or its workspace
+            // becomes one. Give it the stream's shape again then; a window
+            // that stays floating keeps whatever size the user gave it.
+            if let (Some(w), Some(seen)) = (&window, &r.window)
+                && w.mode_floated
+                && !seen.mode_floated
+                && (&w.stable_id, w.pid) == (&seen.stable_id, seen.pid)
+                && w.fullscreen == 0
+                && let Some(size) = stream_shape(&r, w).await
+            {
+                match desktop::shape(w, size).await {
+                    Err(error) if !desktop::identity_lost(&error) => {
+                        eprintln!("{name}: could not reshape the floated window: {error}");
+                    }
+                    _ => {}
                 }
             }
             let changed_visibility = window.as_ref().map(|w| (&w.stable_id, w.pid, w.visible))
@@ -947,6 +957,17 @@ impl Manager {
     }
 }
 
+/// Logical size that gives a floating stream window the stream's own shape on
+/// its monitor, or `None` when the stream size or monitor is unknown.
+async fn stream_shape(r: &Session, w: &Window) -> Option<(i64, i64)> {
+    let stream = r
+        .resolution
+        .clone()
+        .or_else(|| r.settings["stream_resolution"].as_str().map(String::from))?;
+    let monitors = desktop::monitors().await.ok()?;
+    let monitor = monitors.iter().find(|m| m.id == w.monitor)?;
+    desktop::floating_size(&stream, monitor)
+}
 /// Retire only a durably settled directory. Callers hold the daemon's session
 /// map mutex or its exclusive writer lock, serializing this rename with connect.
 pub fn retire_session(paths: &Paths, name: &str) -> Result<()> {

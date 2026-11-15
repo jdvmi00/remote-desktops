@@ -356,16 +356,25 @@ pub async fn initialize(
         let mode = if fullscreen { 2 } else { 0 };
         dispatch_checked(window, &format!("hl.dsp.window.fullscreen_state({{window='address:'..w.address,internal={mode},client={mode},action='set'}})")).await?;
     }
-    if let Some((width, height)) = float_size {
-        dispatch_checked(window, &format!("hl.dsp.window.resize({{window='address:'..w.address,x={width},y={height},relative=false}})")).await?;
-        dispatch_checked(
-            window,
-            "hl.dsp.window.center({window='address:'..w.address})",
-        )
-        .await?;
-        dispatch_checked(window, "hl.dsp.window.set_prop({window='address:'..w.address,prop='keep_aspect_ratio',value='1'})").await?;
+    if let Some(size) = float_size {
+        shape(window, size).await?;
     }
     Ok(())
+}
+/// Give a floating window the stream's shape, centered, and keep that shape
+/// while it is resized.
+pub async fn shape(window: &Window, (width, height): (i64, i64)) -> Result<()> {
+    dispatch_checked(window, &format!("hl.dsp.window.resize({{window='address:'..w.address,x={width},y={height},relative=false}})")).await?;
+    dispatch_checked(
+        window,
+        "hl.dsp.window.center({window='address:'..w.address})",
+    )
+    .await?;
+    dispatch_checked(
+        window,
+        "hl.dsp.window.set_prop({window='address:'..w.address,prop='keep_aspect_ratio',value='1'})",
+    )
+    .await
 }
 /// Lua that runs `dispatch` only on the window whose every identity field
 /// still matches. Comparing a 0.57 string stable_id with a number is always
