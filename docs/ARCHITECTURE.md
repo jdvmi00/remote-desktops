@@ -98,11 +98,15 @@ Moonlight scales the video to its window and keeps the stream's shape, so a
 windowed stream can be resized freely, tiled or floating, without a restart.
 Omarchy's floating workspace mode opens every window at one generic size. A
 windowed stream that mode floated (an `omarchy-mode-` tag on a floating
-window) is resized once, in the same startup step, to the stream's shape: as
+window) is resized, in the same startup step, to the stream's shape: as
 large as fits in 70% of its monitor, and no larger than one stream pixel per
 screen pixel. It is centered and given `keep_aspect_ratio`, so dragging an
-edge scales the picture without bars. A window floated by the user or by a
-rule of their own, and any tiled window, keeps its size. This is the one
+edge scales the picture without bars. The mode floats the window at its
+generic size again whenever it is carried back into a floating workspace, or
+its workspace becomes one, so the stream's shape is applied again at that
+change. A mode-floated window that stays floating keeps the size the user
+gives it. A window floated by the user or by a rule of their own, and any
+tiled window, keeps its size. This is the one
 exception to the rule that the controller sets no window size.
 
 The CLI also runs without a Hyprland observer. In that case it reports process
